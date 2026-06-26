@@ -17,8 +17,8 @@ const BG_LIGHTNESS = 0.18
 const MOBILE_BREAKPOINT_PX = 768
 
 // --- Blob'ы: количество ---
-const BLOB_COUNT_MIN = 6
-const BLOB_COUNT_MAX = 32
+const BLOB_COUNT_MIN = 24
+const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
 // Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
 const BLOB_COUNT_DIVISOR_PX = 180
 
@@ -282,7 +282,10 @@ class CanvasBackground {
         }
 
         const gradient = x.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-        gradient.addColorStop(0, color + 'ff')
+        // Ядро блоба делаем alpha=0xcc (≈0.8) вместо 0xff (1.0): при слиянии
+        // 3-4 блобов под source-over пиковая сумма альф остаётся < 1.0, цвет
+        // не клиппится и зона наложения сохраняет палитру обложки.
+        gradient.addColorStop(0, color + 'cc')
         gradient.addColorStop(0.5, color + '99')
         gradient.addColorStop(1, color + '00')
 
@@ -462,7 +465,11 @@ class CanvasBackground {
         this.ctx.rotate(time * 0.00001)
         this.ctx.translate(-width / 2, -height / 2)
 
-        this.ctx.globalCompositeOperation = 'lighter'
+        // Раньше стоял 'lighter' (аддитивное смешивание): при наложении 3-4
+        // блобов RGB быстро упирался в 255 и зона слияния становилась чисто
+        // белой. 'source-over' использует alpha-compositing — пиксели смешиваются
+        // через альфу, итоговый цвет никогда не белее самого яркого блоба.
+        this.ctx.globalCompositeOperation = 'source-over'
         this.ctx.filter = window.innerWidth < MOBILE_BREAKPOINT_PX ? `blur(${BLUR_MOBILE_PX}px)` : `blur(${BLUR_DESKTOP_PX}px)`
 
         const t = this.animationTime
