@@ -20,7 +20,7 @@ const BG_LIGHTNESS = 0.18
 const MOBILE_BREAKPOINT_PX = 768
 
 // --- Blob'ы: количество ---
-const BLOB_COUNT_MIN = 24
+const BLOB_COUNT_MIN = 36
 const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
 // Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
 const BLOB_COUNT_DIVISOR_PX = 180
