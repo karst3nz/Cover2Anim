@@ -18,6 +18,53 @@
                     "type": "button",
                     "bool": true,
                     "defaultParameter": false
+                },
+                {
+                    "id": "filter",
+                    "name": "CSS filter",
+                    "description": "Значение CSS-свойства filter для canvas-фона. По умолчанию blur(100px) — мягкое свечение blob'ов. Можно комбинировать: blur(80px) saturate(1.2) contrast(1.05). Пустая строка отключает фильтр.",
+                    "type": "text",
+                    "defaultParameter": "blur(100px)"
+                },
+                {
+                    "id": "paletteFadeMs",
+                    "name": "Длительность бленда палитры",
+                    "description": "Время (мс) полного бленда палитры blob'ов и фона при смене обложки. 0 — мгновенная смена, 5000 — очень плавная.",
+                    "type": "slider",
+                    "min": 0,
+                    "max": 5000,
+                    "step": 50,
+                    "defaultParameter": 1800
+                },
+                {
+                    "id": "paletteBlendSpeed",
+                    "name": "Скорость бленда палитры",
+                    "description": "Множитель к скорости перехода цветов. 1 — стандарт, >1 — быстрее, <1 — медленнее (визуально плавнее).",
+                    "type": "slider",
+                    "min": 0.5,
+                    "max": 3,
+                    "step": 0.1,
+                    "defaultParameter": 1
+                },
+                {
+                    "id": "blobCountMin",
+                    "name": "Минимум blob'ов",
+                    "description": "Минимальное число blob'ов на мобильных экранах (множитель для десктопа: ×2). Изменение требует переоткрытия модалки плеера.",
+                    "type": "slider",
+                    "min": 16,
+                    "max": 96,
+                    "step": 4,
+                    "defaultParameter": 36
+                },
+                {
+                    "id": "blobSpeed",
+                    "name": "Скорость blob'ов",
+                    "description": "Множитель к базовым скоростям дрейфа и пульсации. 1 — стандарт, >1 — энергичнее, <1 — спокойнее. Изменение пересоздаёт blob'ы.",
+                    "type": "slider",
+                    "min": 0.25,
+                    "max": 4,
+                    "step": 0.25,
+                    "defaultParameter": 1
                 }
             ]
         }
