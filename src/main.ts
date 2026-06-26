@@ -10,7 +10,7 @@ const COVER_SELECTOR = 'img[data-test-id="ENTITY_COVER_IMAGE"]'
 const FALLBACK_PALETTE = ['#ff3366', '#ff8800', '#ffcc00', '#00ccff', '#4466ff', '#aa00ff']
 
 // Время (мс) полного бленда палитры blob'ов и фона при смене обложки.
-const PALETTE_FADE_MS = 1000
+const PALETTE_FADE_MS = 1800
 
 // Целевая лёгкость (HSL L) для фонового цвета: 0 = чёрный, 1 = белый.
 // 0.18 — тёмный, но с различимым оттенком обложки, UI поверх остаётся читаемым.
@@ -48,7 +48,8 @@ const BLOB_SPEED_PULSE_MAX = 0.0007
 
 // --- Blob'ы: волна бленда палитры ---
 // colorOffset распределяет старт бленда по blob'ам: colorOffset = (i / count) * WAVE_SPREAD.
-const PALETTE_WAVE_SPREAD = 0.8
+// Меньше значение — больше blob'ов блендится одновременно (видимая часть бленда длиннее).
+const PALETTE_WAVE_SPREAD = 0.25
 
 // --- Размытие canvas ---
 const BLUR_DESKTOP_PX = 100
@@ -56,7 +57,7 @@ const BLUR_MOBILE_PX = 70
 
 const RETRY_DELAY_MS = 1500
 const MAX_RETRIES = 100
-const COVER_DEBOUNCE_MS = 5000
+const COVER_DEBOUNCE_MS = 200
 
 // FPS-счётчик обновляет textContent не каждый кадр, а раз в этот интервал —
 // иначе reflow DOM будет съедать несколько процентов производительности,
@@ -427,11 +428,23 @@ class CanvasBackground {
             }
 
             const newTargetColor = colors[bestIdx]
-            if (newTargetColor === blob.color) {
-                // Цвет не изменился — сбрасываем бленд, чистим previousTexture,
-                // чтобы draw() не рисовал фантомный слой.
-                blob.targetColor = newTargetColor
+            if (blob.colorMix < 1) {
+                blob.previousTexture = blob.texture
+                blob.color = blob.targetColor
                 blob.colorMix = 1
+                if (newTargetColor === blob.color) {
+                    blob.targetColor = newTargetColor
+                    blob.previousTexture = null
+                    return
+                }
+            } else if (newTargetColor === blob.targetColor) {
+                // Цель совпадает и бленд уже дошёл до финала — ничего не делаем.
+                return
+            }
+            if (newTargetColor === blob.color) {
+                // Цвет уже отрисовывается финально — синхронизируем targetColor,
+                // чистим previousTexture на случай, если он остался от прошлого.
+                blob.targetColor = newTargetColor
                 blob.previousTexture = null
                 return
             }
@@ -795,6 +808,14 @@ class CanvasBackground {
         const src = this.pickCoverUrl(img)
         if (!src) {
             warn('applyCover: cover image has no src, skipping')
+            return
+        }
+
+        // Идемпотентность: coverObserver и reconcileBackground могут звать
+        // applyCover почти одновременно с одним и тем же src. Без этой проверки
+        // получаем два CORS-запроса и два applyPalette с похожими (но разными
+        // из-за JPEG-шума) палитрами — второй бленд ломает плавность первого.
+        if (src === this.pendingCoverSrc || src === this.lastAppliedSrc) {
             return
         }
 
