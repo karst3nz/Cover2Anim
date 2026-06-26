@@ -1,6 +1,7 @@
 import './styles.css'
 
 const MODAL_SELECTOR = 'div[data-test-id="FULLSCREEN_PLAYER_MODAL"]'
+const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT"]'
 const COVER_SELECTOR = 'img[data-test-id="ENTITY_COVER_IMAGE"]'
 
 const FALLBACK_PALETTE = ['#ff3366', '#ff8800', '#ffcc00', '#00ccff', '#4466ff', '#aa00ff']
@@ -83,6 +84,7 @@ type Blob = {
     color: string
     targetColor: string
     texture: HTMLCanvasElement
+    previousTexture: HTMLCanvasElement | null
     baseX: number
     baseY: number
     radius: number
@@ -309,6 +311,7 @@ class CanvasBackground {
                 color,
                 targetColor: color,
                 texture: this.createBlobTexture(color),
+                previousTexture: null,
                 baseX: Math.random() * width,
                 baseY: Math.random() * height,
                 radius: BLOB_RADIUS_MIN + Math.random() * radiusRange,
@@ -364,8 +367,26 @@ class CanvasBackground {
             } else if (!used[bestIdx]) {
                 used[bestIdx] = true
             }
-            blob.targetColor = colors[bestIdx]
+
+            const newTargetColor = colors[bestIdx]
+            if (newTargetColor === blob.color) {
+                // Цвет не изменился — сбрасываем бленд, чистим previousTexture,
+                // чтобы draw() не рисовал фантомный слой.
+                blob.targetColor = newTargetColor
+                blob.colorMix = 1
+                blob.previousTexture = null
+                return
+            }
+
+            // Сохраняем текущую текстуру как «старую» — она будет постепенно
+            // угасать в draw() через globalAlpha = 1 - t. Один раз за весь
+            // переход, а не на каждом кадре.
+            blob.previousTexture = blob.texture
+            blob.targetColor = newTargetColor
             blob.colorMix = 0
+            // Новая текстура создаётся ровно один раз — до этого бленд
+            // опирается на previousTexture и новую текстуру.
+            blob.texture = this.createBlobTexture(newTargetColor)
         })
         log('palette updated', colors)
     }
@@ -404,19 +425,16 @@ class CanvasBackground {
 
             blob.currentRadius = blob.radius + Math.sin(this.animationTime * blob.pulseSpeed + blob.pulsePhase) * BLOB_PULSE_AMPLITUDE
 
+            // colorMix накапливает «прошедшее время» бленда в долях от PALETTE_FADE_MS.
+            // colorOffset разносит старт бленда по blob'ам, чтобы переход шёл волной.
+            // Текстура больше НЕ пересоздаётся на каждом кадре — бленд идёт через
+            // наложение previousTexture и texture в draw() с globalAlpha = 1-t / t.
             if (blob.color !== blob.targetColor) {
-                // colorMix накапливает «прошедшее время» бленда в долях от PALETTE_FADE_MS.
-                // colorOffset разносит старт бленда по blob'ам, чтобы переход шёл волной.
                 blob.colorMix = Math.min(1, blob.colorMix + dt / PALETTE_FADE_MS)
-                const rawT = Math.max(0, Math.min(1, blob.colorMix - blob.colorOffset))
-                // smoothstep: плавный старт и плавный финал, без линейного «разгона»
-                const t = rawT * rawT * (3 - 2 * rawT)
-                if (t > 0) {
-                    const currentColor = this.blendHex(blob.color, blob.targetColor, t)
-                    blob.texture = this.createBlobTexture(currentColor)
-                }
                 if (blob.colorMix >= 1) {
+                    // Бленд завершён — фиксируем целевой цвет, освобождаем previousTexture.
                     blob.color = blob.targetColor
+                    blob.previousTexture = null
                 }
             }
         }
@@ -452,11 +470,40 @@ class CanvasBackground {
             const x = blob.baseX + Math.sin(t * blob.speedX + blob.phaseX) * blob.orbitX
             const y = blob.baseY + Math.cos(t * blob.speedY + blob.phaseY) * blob.orbitY
             const r = blob.currentRadius
-            this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+
+            // Плавный бленд между previousTexture и texture через globalAlpha.
+            // Раньше текстура пересоздавалась на каждом кадре через blendHex +
+            // createBlobTexture (до 32 новых offscreen-canvas на кадр в течение
+            // секунды), что вызывало рывки и GC-фризы. Теперь две текстуры
+            // накладываются с альфой — без аллокаций в горячем пути RAF.
+            if (blob.previousTexture) {
+                const rawT = Math.max(0, Math.min(1, blob.colorMix - blob.colorOffset))
+                // smoothstep: плавный старт и плавный финал, без линейного «разгона»
+                const blendT = rawT * rawT * (3 - 2 * rawT)
+                if (blendT <= 0) {
+                    // Ещё не дошла волна — рисуем только старую текстуру в полную альфу.
+                    this.ctx.globalAlpha = 1
+                    this.ctx.drawImage(blob.previousTexture, x - r, y - r, r * 2, r * 2)
+                } else if (blendT >= 1) {
+                    // Волна прошла полностью — рисуем только новую текстуру.
+                    this.ctx.globalAlpha = 1
+                    this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+                } else {
+                    // Переходная фаза: старая угасает, новая разгорается.
+                    this.ctx.globalAlpha = 1 - blendT
+                    this.ctx.drawImage(blob.previousTexture, x - r, y - r, r * 2, r * 2)
+                    this.ctx.globalAlpha = blendT
+                    this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+                }
+            } else {
+                this.ctx.globalAlpha = 1
+                this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+            }
         }
 
         this.ctx.restore()
         this.ctx.filter = 'none'
+        this.ctx.globalAlpha = 1
     }
 
     private rgbToHex(r: number, g: number, b: number): string {
@@ -743,8 +790,19 @@ class CanvasBackground {
     }
 
     private findCover(): HTMLImageElement | null {
-        const scope = this.container.matches(MODAL_SELECTOR) ? this.container : (this.container.querySelector(MODAL_SELECTOR) ?? document)
-        const img = scope.querySelector(COVER_SELECTOR)
+        // Строгий scope: ищем обложку ТОЛЬКО внутри блока постера в модалке плеера.
+        // Никаких fallback на document/модалку — иначе захватим обложку
+        // мини-плеера, превью плейлистов или других треков и перекрасим
+        // фон не тем треком.
+        const modal = this.container.matches(MODAL_SELECTOR) ? this.container : this.container.querySelector(MODAL_SELECTOR)
+        if (!modal) {
+            return null
+        }
+        const poster = modal.querySelector(POSTER_CONTENT_SELECTOR)
+        if (!poster) {
+            return null
+        }
+        const img = poster.querySelector(COVER_SELECTOR)
         return img instanceof HTMLImageElement ? img : null
     }
 
@@ -813,37 +871,46 @@ class CanvasBackground {
 
     private observeCover(): void {
         if (typeof MutationObserver !== 'undefined') {
-            const root = this.container.querySelector(MODAL_SELECTOR) ?? document.body
-            if (!root) {
-                warn('observeCover: no root element to observe')
+            // Строгий scope: наблюдаем ТОЛЬКО за блоком постера внутри модалки.
+            // Никаких fallback на document/body/модалку — иначе MutationObserver
+            // начнёт ловить смены src на чужих обложках (мини-плеер, превью
+            // плейлистов) и триггерить applyCover на чужие треки.
+            const modal = this.container.matches(MODAL_SELECTOR) ? this.container : this.container.querySelector(MODAL_SELECTOR)
+            if (!modal) {
+                warn('observeCover: modal not found, skipping observer (will retry via reconcileBackground)')
             } else {
-                this.coverObserver = new MutationObserver(records => {
-                    for (const record of records) {
-                        if (record.type !== 'attributes' || record.attributeName !== 'src') {
-                            continue
-                        }
-                        const target = record.target
-                        if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
-                            // Сменился src обложки — снимаем заморозку pollCover,
-                            // чтобы он смог пересчитать палитру под новый трек.
-                            // childList/remount без смены src флаг не сбрасывает.
-                            if (this.pollFrozen) {
-                                log('cover src changed → unfreeze pollCover')
-                                this.pollFrozen = false
+                const root = modal.querySelector(POSTER_CONTENT_SELECTOR)
+                if (!root) {
+                    warn('observeCover: poster content not found in modal, skipping observer')
+                } else {
+                    this.coverObserver = new MutationObserver(records => {
+                        for (const record of records) {
+                            if (record.type !== 'attributes' || record.attributeName !== 'src') {
+                                continue
                             }
-                            log('cover image src changed', target.src)
-                            this.applyCover(target)
+                            const target = record.target
+                            if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
+                                // Сменился src обложки — снимаем заморозку pollCover,
+                                // чтобы он смог пересчитать палитру под новый трек.
+                                // childList/remount без смены src флаг не сбрасывает.
+                                if (this.pollFrozen) {
+                                    log('cover src changed → unfreeze pollCover')
+                                    this.pollFrozen = false
+                                }
+                                log('cover image src changed', target.src)
+                                this.applyCover(target)
+                            }
                         }
-                    }
-                })
+                    })
 
-                this.coverObserver.observe(root, {
-                    subtree: true,
-                    attributes: true,
-                    attributeFilter: ['src', 'srcset'],
-                    childList: true,
-                })
-                log('cover observer started')
+                    this.coverObserver.observe(root, {
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['src', 'srcset'],
+                        childList: true,
+                    })
+                    log('cover observer started')
+                }
             }
         } else {
             warn('observeCover: MutationObserver unavailable, relying on polling only')
