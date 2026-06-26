@@ -13,7 +13,7 @@ div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
 }
 
 /* Стилизация Canvas-подложки */
-.betterplayer-canvas-bg {
+.c2a-canvas-bg {
     position: absolute;
     top: 0;
     left: 0;
@@ -34,7 +34,7 @@ class CanvasBackground {
     constructor(container) {
         this.container = container;
         this.canvas = document.createElement('canvas');
-        this.canvas.className = 'betterplayer-canvas-bg';
+        this.canvas.className = 'c2a-canvas-bg';
         this.ctx = this.canvas.getContext('2d');
 
         // Внедряем как первый элемент в контейнер

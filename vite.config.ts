@@ -34,6 +34,7 @@ function createMetadata() {
         css: 'script.css',
         script: 'script.js',
         tags: Array.isArray(addonConfig.tags) ? addonConfig.tags : [],
+        conflictsWith: Array.isArray(addonConfig.conflictsWith) ? addonConfig.conflictsWith : [],
         dependencies: Array.isArray(addonConfig.dependencies) ? addonConfig.dependencies : [],
         allowedUrls: Array.isArray(addonConfig.allowedUrls) ? addonConfig.allowedUrls : [],
         supportedVersions: Array.isArray(addonConfig.supportedVersions) ? addonConfig.supportedVersions : [],

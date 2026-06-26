@@ -10,6 +10,14 @@
                     "type": "button",
                     "bool": true,
                     "defaultParameter": true
+                },
+                {
+                    "id": "showFps",
+                    "name": "Показывать FPS",
+                    "description": "Отображать счётчик кадров в секунду поверх анимации.",
+                    "type": "button",
+                    "bool": true,
+                    "defaultParameter": false
                 }
             ]
         }
