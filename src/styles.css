@@ -1,0 +1,20 @@
+div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::before,
+div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
+    z-index: -1 !important;
+}
+
+.betterplayer-canvas-bg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    pointer-events: none;
+    background: #000;
+}
+
+div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode > *:not(.betterplayer-canvas-bg) {
+    position: relative;
+    z-index: 1;
+}

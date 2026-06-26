@@ -1,0 +1,17 @@
+{
+    "sections": [
+        {
+            "title": "Cover2Anim",
+            "items": [
+                {
+                    "id": "enabled",
+                    "name": "Включить аддон",
+                    "description": "Показывать анимированный фон в полноэкранном плеере.",
+                    "type": "button",
+                    "bool": true,
+                    "defaultParameter": true
+                }
+            ]
+        }
+    ]
+}

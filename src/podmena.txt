@@ -1,0 +1,107 @@
+Методическое руководство по интеграции `<canvas>` вместо стандартного фонового изображения в архитектуре PulseSync.
+
+---
+
+### 1. Отключение стандартного CSS/JS-фона
+Стандартный фон рендерится через псевдоэлементы `::before` и `::after` у контейнера `FULLSCREEN_PLAYER_MODAL`. Чтобы они не перекрывали `<canvas>`, их нужно скрыть с помощью CSS-класса:
+
+```css
+/* Добавьте в style.css */
+div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::before,
+div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
+    display: none !important; /* Отключаем стандартный CSS-рендер */
+}
+
+/* Стилизация Canvas-подложки */
+.betterplayer-canvas-bg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: -2; /* Размещаем строго под элементами управления */
+    pointer-events: none; /* Пропускаем клики сквозь холст */
+}
+```
+
+---
+
+### 2. Инициализация и внедрение Canvas
+Для работы с холстом пишется простой менеджер, который создает `<canvas>` внутри модального окна и следит за его размерами при ресайзе.
+
+```javascript
+class CanvasBackground {
+    constructor(container) {
+        this.container = container;
+        this.canvas = document.createElement('canvas');
+        this.canvas.className = 'betterplayer-canvas-bg';
+        this.ctx = this.canvas.getContext('2d');
+
+        // Внедряем как первый элемент в контейнер
+        this.container.insertBefore(this.canvas, this.container.firstChild);
+        this.container.classList.add('canvas-mode'); // Активируем CSS-класс скрытия CSS-фона
+
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+    }
+
+    resize() {
+        this.canvas.width = this.container.clientWidth;
+        this.canvas.height = this.container.clientHeight;
+        // Здесь можно вызвать функцию перерисовки кадра
+    }
+}
+```
+
+---
+
+### 3. Точка интеграции в JS-скрипт (Подмена рендеринга)
+
+Вместо вызова стандартных анимаций перехода (`crossfadeToImage` / `fallbackSetBackground`) в функции `setPlayerBackground` вы перенаправляете URL обложки в ваш обработчик Canvas:
+
+#### Было (в `script.js`):
+```javascript
+function setPlayerBackground(settings, imageUrl) {
+    // ...
+    const backgroundDiv = domSafeQuerySelector(SELECTORS.FULLSCREEN_PLAYER_MODAL);
+    // ... Вызовы кроссфейда и CSS-переходов
+}
+```
+
+#### Стало (для работы с Canvas):
+```javascript
+let canvasBgInstance = null;
+
+function setPlayerBackground(settings, imageUrl) {
+    const backgroundDiv = domSafeQuerySelector(SELECTORS.FULLSCREEN_PLAYER_MODAL);
+    if (!backgroundDiv) return;
+
+    // Ленивая инициализация Canvas при первом открытии плеера
+    if (!canvasBgInstance) {
+        canvasBgInstance = new CanvasBackground(backgroundDiv);
+    }
+
+    if (imageUrl) {
+        // Передаем URL картинки в Canvas для вашей кастомной логики (эффекты, размытие, шейдеры)
+        drawCoverToCanvas(canvasBgInstance.ctx, canvasBgInstance.canvas, imageUrl);
+    }
+}
+
+// Шаблон функции отрисовки на холсте
+function drawCoverToCanvas(ctx, canvas, url) {
+    const img = new Image();
+    img.crossOrigin = 'Anonymous'; // Важно для работы с внешними URL без CORS-ошибок
+    img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Пример отрисовки с эффектом Cover (сохраняя пропорции)
+        const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
+        const x = (canvas.width - img.width * scale) / 2;
+        const y = (canvas.height - img.height * scale) / 2;
+
+        ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
+
+        // ТУТ можно применить кастомные Canvas-фильтры (blur, brightness) или запустить анимацию
+    };
+    img.src = url;
+}
