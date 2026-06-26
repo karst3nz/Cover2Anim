@@ -56,7 +56,6 @@ const BLUR_MOBILE_PX = 70
 
 const RETRY_DELAY_MS = 1500
 const MAX_RETRIES = 100
-const PALETTE_POLL_MS = 20000
 const COVER_DEBOUNCE_MS = 5000
 
 // FPS-счётчик обновляет textContent не каждый кадр, а раз в этот интервал —
@@ -121,7 +120,6 @@ class CanvasBackground {
     private rafId = 0
     private resizeObserver: ResizeObserver | null = null
     private coverObserver: MutationObserver | null = null
-    private palettePollTimer: number | null = null
 
     private settings: { enabled: boolean; showFps: boolean } = { enabled: true, showFps: false }
     private basePalette: string[] = []
@@ -137,11 +135,8 @@ class CanvasBackground {
 
     private coverRequestId = 0
     private lastAppliedSrc: string | null = null
-    private pollFrozen = false
     private coverDebounceTimer: number | null = null
     private pendingCoverSrc: string | null = null
-    private recentPalettes: string[][] = []
-    private static readonly RECENT_PALETTES_MAX = 3
 
     constructor(container: HTMLElement, initialSettings?: { enabled: boolean; showFps: boolean }) {
         this.container = container
@@ -202,11 +197,6 @@ class CanvasBackground {
 
     destroy(): void {
         cancelAnimationFrame(this.rafId)
-        if (this.palettePollTimer !== null) {
-            window.clearInterval(this.palettePollTimer)
-            this.palettePollTimer = null
-            log('palette poll timer stopped')
-        }
         if (this.coverDebounceTimer !== null) {
             window.clearTimeout(this.coverDebounceTimer)
             this.coverDebounceTimer = null
@@ -231,7 +221,10 @@ class CanvasBackground {
     }
 
     requestPaletteRefresh(): void {
-        this.pollCover()
+        const current = this.findCover()
+        if (current) {
+            this.applyCover(current)
+        }
     }
 
     private onWindowResize = (): void => {
@@ -836,7 +829,6 @@ class CanvasBackground {
             }
             const base = this.extractColors(corsImage)
             this.basePalette = base
-            this.recentPalettes = [[...base]]
             // Доминирующий цвет для фона — средневзвешенный по всей картинке.
             // Топ-1 кластер может быть случайным акцентом в углу (иконка лейбла и т.п.),
             // а средний цвет корректно отражает обложку в целом (белый/чёрный/бежевый → серый).
@@ -966,13 +958,6 @@ class CanvasBackground {
                             }
                             const target = record.target
                             if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
-                                // Сменился src обложки — снимаем заморозку pollCover,
-                                // чтобы он смог пересчитать палитру под новый трек.
-                                // childList/remount без смены src флаг не сбрасывает.
-                                if (this.pollFrozen) {
-                                    log('cover src changed → unfreeze pollCover')
-                                    this.pollFrozen = false
-                                }
                                 log('cover image src changed', target.src)
                                 this.applyCover(target)
                             }
@@ -989,108 +974,8 @@ class CanvasBackground {
                 }
             }
         } else {
-            warn('observeCover: MutationObserver unavailable, relying on polling only')
+            warn('observeCover: MutationObserver unavailable')
         }
-
-        // Подстраховка: каждые PALETTE_POLL_MS проверяем обложку, даже если
-        // MutationObserver пропустил смену (например, React-ремоунт без мутации src).
-        this.palettePollTimer = window.setInterval(() => this.pollCover(), PALETTE_POLL_MS)
-        log(`palette poll timer started (every ${PALETTE_POLL_MS}ms)`)
-    }
-
-    private pollCover(): void {
-        // После применения новой палитры pollCover «замораживается» до смены обложки.
-        // Иначе каждое срабатывание setInterval/reconcileBackground снова и снова
-        // гоняет обложку через CORS, reapply-ит ту же палитру и грузит процессор.
-        if (this.pollFrozen) {
-            return
-        }
-        const img = this.findCover()
-        if (!img) {
-            log('pollCover: no cover image found')
-            return
-        }
-        const src = this.pickCoverUrl(img)
-        if (!src) {
-            log('pollCover: cover image has no src')
-            return
-        }
-        // Проверяем только то, что картинка уже загружена в DOM — иначе пиксели ещё не доступны
-        if (!img.complete || img.naturalWidth === 0) {
-            log('pollCover: cover not yet loaded')
-            return
-        }
-
-        const requestId = ++this.coverRequestId
-        const corsImage = new Image()
-        corsImage.crossOrigin = 'anonymous'
-        corsImage.referrerPolicy = 'no-referrer'
-        corsImage.onload = () => {
-            if (requestId !== this.coverRequestId) {
-                return
-            }
-            const base = this.extractColors(corsImage)
-            // Сравниваем не только с текущей палитрой, но и с последними N —
-            // из-за shuffle() кластеризация может чередовать два стабильных
-            // состояния, и нужно глушить оба.
-            for (const recent of this.recentPalettes) {
-                if (this.palettesEqual(base, recent)) {
-                    log(`pollCover: palette unchanged (matches recent, ${base.length} colors)`)
-                    return
-                }
-            }
-            if (this.palettesEqual(base, this.basePalette)) {
-                log(`pollCover: palette unchanged (${base.length} colors)`)
-                return
-            }
-            log(`pollCover: palette differs, reapplying`, base)
-            this.basePalette = base
-            this.recentPalettes.unshift([...base])
-            if (this.recentPalettes.length > CanvasBackground.RECENT_PALETTES_MAX) {
-                this.recentPalettes.pop()
-            }
-            const rawDominant = this.averageColor(corsImage)
-            const dominant = this.darken(rawDominant, BG_LIGHTNESS)
-            this.applyPalette(base, dominant)
-            this.lastAppliedSrc = src
-            // Замораживаем дальнейшие проверки до смены обложки — следующий
-            // pollCover() будет no-op, пока coverObserver не увидит новый src.
-            this.pollFrozen = true
-            log('pollCover: frozen until cover src changes')
-        }
-        corsImage.onerror = () => {
-            if (requestId !== this.coverRequestId) {
-                return
-            }
-            log(`pollCover: CORS load failed for ${src}`)
-        }
-        corsImage.src = src
-    }
-
-    private palettesEqual(a: string[], b: string[]): boolean {
-        if (a.length !== b.length) {
-            return false
-        }
-        // Сортируем оба массива — кластеризация после shuffle() даёт
-        // недетерминированный порядок цветов, и без сортировки одинаковые
-        // палитры выглядят разными.
-        const sortedA = [...a].sort()
-        const sortedB = [...b].sort()
-        // Допуск d² < 1500 (≈28 на канал) учитывает джиттер JPEG/антиалиасинг:
-        // тёмные оттенки могут различаться на 20-30 единиц в каждом канале между
-        // соседними сэмплами из-за шума, и это нормально.
-        const THRESHOLD_SQ = 1500
-        for (let i = 0; i < sortedA.length; i++) {
-            const ca = this.hexToRgb(sortedA[i])
-            const cb = this.hexToRgb(sortedB[i])
-            const dr = ca.r - cb.r
-            const dg = ca.g - cb.g
-            const db = ca.b - cb.b
-            if (dr * dr + dg * dg + db * db > THRESHOLD_SQ) {
-                return false
-            }
-        }
-        return true
     }
 }
 
@@ -1197,8 +1082,8 @@ function watchModal(): void {
 
     // Срабатываем только при реальном появлении/исчезновении модалки или обложки.
     // Любые прочие DOM-мутации плеера (прогресс, тулбары, тексты трека) — игнорируем,
-    // иначе reconcileBackground() будет дёргать requestPaletteRefresh() → pollCover()
-    // на каждый кадр взаимодействия и грузить обложку повторно через CORS.
+    // иначе reconcileBackground() будет дёргать requestPaletteRefresh() и грузить
+    // обложку повторно через CORS на каждый чих.
     const observer = new MutationObserver(records => {
         for (const record of records) {
             if (record.type !== 'childList') {
