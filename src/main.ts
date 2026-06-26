@@ -1,70 +1,66 @@
 import './styles.css'
 
 import addonConfig from '../addon.config.mjs'
-import { getAddonSettings, readBooleanSetting } from './pulsesync'
+import { getAddonSettings, readBooleanSetting, readNumberSetting } from './pulsesync'
+import {
+    BG_LIGHTNESS,
+    BG_LIGHTNESS_MAX,
+    BG_LIGHTNESS_MIN,
+    BLOB_COUNT_DIVISOR_PX,
+    BLOB_COUNT_MAX,
+    BLOB_COUNT_MIN,
+    BLOB_COUNT_MIN_SETTING_MAX,
+    BLOB_COUNT_MIN_SETTING_MIN,
+    BLOB_ORBIT_MAX,
+    BLOB_ORBIT_MIN,
+    BLOB_PULSE_AMPLITUDE,
+    BLOB_RADIUS_INITIAL,
+    BLOB_RADIUS_MAX,
+    BLOB_RADIUS_MIN,
+    BLOB_SPEED_DRIFT_MAX,
+    BLOB_SPEED_DRIFT_MIN,
+    BLOB_SPEED_MAX,
+    BLOB_SPEED_MIN,
+    BLOB_SPEED_PULSE_MAX,
+    BLOB_SPEED_PULSE_MIN,
+    BLOB_TEXTURE_ALPHA_CORE,
+    BLOB_TEXTURE_ALPHA_EDGE,
+    BLOB_TEXTURE_ALPHA_MID,
+    BLOB_TEXTURE_SIZE_PX,
+    BLUR_DESKTOP_PX,
+    BLUR_MOBILE_PX,
+    CANVAS_ROTATION_RAD_PER_MS,
+    CLUSTER_MERGE_RGB_DIST,
+    COVER_DEBOUNCE_MS,
+    COVER_DEFAULT_SIZE_PX,
+    COVER_SAMPLE_TARGET_COUNT,
+    COVER_SELECTOR,
+    EXTRACTED_PALETTE_SIZE,
+    FALLBACK_PALETTE,
+    FPS_UPDATE_INTERVAL_MS,
+    INITIAL_BACKGROUND_COLOR,
+    INITIAL_FRAME_DELTA_MS,
+    LOG_PREFIX,
+    MAX_RETRIES,
+    MODAL_SELECTOR,
+    MOBILE_BREAKPOINT_PX,
+    PALETTE_BLEND_SPEED_MAX,
+    PALETTE_BLEND_SPEED_MIN,
+    PALETTE_FADE_MS,
+    PALETTE_FADE_MS_MAX,
+    PALETTE_FADE_MS_MIN,
+    PALETTE_WAVE_SPREAD,
+    POSTER_CONTENT_SELECTOR,
+    RETRY_DELAY_MS,
+    SETTING_KEY_BG_LIGHTNESS,
+    SETTING_KEY_BLOB_COUNT_MIN,
+    SETTING_KEY_BLOB_SPEED,
+    SETTING_KEY_ENABLED,
+    SETTING_KEY_PALETTE_BLEND_SPEED,
+    SETTING_KEY_PALETTE_FADE_MS,
+    SETTING_KEY_SHOW_FPS,
+} from './constants'
 
-const MODAL_SELECTOR = 'div[data-test-id="FULLSCREEN_PLAYER_MODAL"]'
-const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT"]'
-const COVER_SELECTOR = 'img[data-test-id="ENTITY_COVER_IMAGE"]'
-
-const FALLBACK_PALETTE = ['#ff3366', '#ff8800', '#ffcc00', '#00ccff', '#4466ff', '#aa00ff']
-
-// Время (мс) полного бленда палитры blob'ов и фона при смене обложки.
-const PALETTE_FADE_MS = 1800
-
-// Целевая лёгкость (HSL L) для фонового цвета: 0 = чёрный, 1 = белый.
-// 0.18 — тёмный, но с различимым оттенком обложки, UI поверх остаётся читаемым.
-const BG_LIGHTNESS = 0.18
-
-// Ширина viewport (px), ниже которой применяются «мобильные» пресеты блюра и числа blob'ов.
-const MOBILE_BREAKPOINT_PX = 768
-
-// --- Blob'ы: количество ---
-const BLOB_COUNT_MIN = 24
-const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
-// Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
-const BLOB_COUNT_DIVISOR_PX = 180
-
-// --- Blob'ы: радиус (базовый, без пульсации) ---
-const BLOB_RADIUS_MIN = 250
-const BLOB_RADIUS_MAX = 500
-// Стартовое значение currentRadius до первого updateBlobs (выровнено по середине диапазона).
-const BLOB_RADIUS_INITIAL = 300
-
-// --- Blob'ы: амплитуда пульсации радиуса ---
-const BLOB_PULSE_AMPLITUDE = 80
-
-// --- Blob'ы: орбита (амплитуда колебаний baseX/baseY) ---
-const BLOB_ORBIT_MIN = 150
-const BLOB_ORBIT_MAX = 650
-
-// --- Blob'ы: скорости ---
-// Дрейф X/Y: множитель t в sin/cos, управляет «плавностью» перемещения.
-const BLOB_SPEED_DRIFT_MIN = 0.0001
-const BLOB_SPEED_DRIFT_MAX = 0.0004
-// Пульсация радиуса: множитель t в sin.
-const BLOB_SPEED_PULSE_MIN = 0.0003
-const BLOB_SPEED_PULSE_MAX = 0.0007
-
-// --- Blob'ы: волна бленда палитры ---
-// colorOffset распределяет старт бленда по blob'ам: colorOffset = (i / count) * WAVE_SPREAD.
-// Меньше значение — больше blob'ов блендится одновременно (видимая часть бленда длиннее).
-const PALETTE_WAVE_SPREAD = 0.25
-
-// --- Размытие canvas ---
-const BLUR_DESKTOP_PX = 100
-const BLUR_MOBILE_PX = 70
-
-const RETRY_DELAY_MS = 1500
-const MAX_RETRIES = 100
-const COVER_DEBOUNCE_MS = 200
-
-// FPS-счётчик обновляет textContent не каждый кадр, а раз в этот интервал —
-// иначе reflow DOM будет съедать несколько процентов производительности,
-// а на 60 fps значения всё равно меняются слишком быстро для глаза.
-const FPS_UPDATE_INTERVAL_MS = 500
-
-const LOG_PREFIX = '[Cover2Anim]'
 
 function log(message: string, ...args: unknown[]): void {
     console.log(`${LOG_PREFIX} ${message}`, ...args)
@@ -109,6 +105,74 @@ type Blob = {
     colorOffset: number
 }
 
+// Все читаемые из PulseSync настройки + runtime-параметры, которые из них выводятся.
+// Изменяются на лету через applySettings: поля с пометкой «blob-affecting» требуют
+// пересоздания blob'ов (recreateBlobs), остальные применяются мгновенно.
+type AddonRuntimeSettings = {
+    enabled: boolean
+    showFps: boolean
+    paletteFadeMs: number
+    blobCountMin: number
+    blobSpeed: number
+    bgLightness: number
+    paletteBlendSpeed: number
+}
+
+// Дефолты — fallback, если пользователь ещё ничего не менял в UI PulseSync.
+// Эти числа должны совпадать со «старыми» жёстко зашитыми константами,
+// чтобы при первом запуске аддон вёл себя идентично прежней версии.
+const DEFAULT_RUNTIME_SETTINGS: AddonRuntimeSettings = {
+    enabled: true,
+    showFps: false,
+    paletteFadeMs: PALETTE_FADE_MS,
+    blobCountMin: BLOB_COUNT_MIN,
+    blobSpeed: 1,
+    bgLightness: BG_LIGHTNESS,
+    paletteBlendSpeed: 1,
+}
+
+// Жёсткие диапазоны для sanitize'а значений из PulseSync (UI может прислать что угодно).
+function clampNumber(value: number, min: number, max: number): number {
+    if (!Number.isFinite(value)) {
+        return min
+    }
+    return Math.min(max, Math.max(min, value))
+}
+
+function sanitizeSettings(raw: Partial<AddonRuntimeSettings>): AddonRuntimeSettings {
+    return {
+        enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_RUNTIME_SETTINGS.enabled,
+        showFps: typeof raw.showFps === 'boolean' ? raw.showFps : DEFAULT_RUNTIME_SETTINGS.showFps,
+        paletteFadeMs: clampNumber(raw.paletteFadeMs ?? DEFAULT_RUNTIME_SETTINGS.paletteFadeMs, PALETTE_FADE_MS_MIN, PALETTE_FADE_MS_MAX),
+        blobCountMin: Math.round(
+            clampNumber(raw.blobCountMin ?? DEFAULT_RUNTIME_SETTINGS.blobCountMin, BLOB_COUNT_MIN_SETTING_MIN, BLOB_COUNT_MIN_SETTING_MAX),
+        ),
+        blobSpeed: clampNumber(raw.blobSpeed ?? DEFAULT_RUNTIME_SETTINGS.blobSpeed, BLOB_SPEED_MIN, BLOB_SPEED_MAX),
+        bgLightness: clampNumber(raw.bgLightness ?? DEFAULT_RUNTIME_SETTINGS.bgLightness, BG_LIGHTNESS_MIN, BG_LIGHTNESS_MAX),
+        paletteBlendSpeed: clampNumber(
+            raw.paletteBlendSpeed ?? DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed,
+            PALETTE_BLEND_SPEED_MIN,
+            PALETTE_BLEND_SPEED_MAX,
+        ),
+    }
+}
+
+// Читает все настройки аддона из PulseSync и собирает в `Partial<AddonRuntimeSettings>`.
+// sanitizeSettings доведёт значения до безопасных диапазонов позже.
+function readRuntimeSettings(): Partial<AddonRuntimeSettings> {
+    const settingsStore = getAddonSettings(addonConfig.name)
+    const settings = settingsStore.getCurrent()
+    return {
+        enabled: readBooleanSetting(settings, SETTING_KEY_ENABLED, DEFAULT_RUNTIME_SETTINGS.enabled),
+        showFps: readBooleanSetting(settings, SETTING_KEY_SHOW_FPS, DEFAULT_RUNTIME_SETTINGS.showFps),
+        paletteFadeMs: readNumberSetting(settings, SETTING_KEY_PALETTE_FADE_MS, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
+        paletteBlendSpeed: readNumberSetting(settings, SETTING_KEY_PALETTE_BLEND_SPEED, DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed),
+        blobCountMin: readNumberSetting(settings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
+        blobSpeed: readNumberSetting(settings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
+        bgLightness: readNumberSetting(settings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
+    }
+}
+
 class CanvasBackground {
     private readonly container: HTMLElement
     private readonly canvas: HTMLCanvasElement
@@ -117,12 +181,12 @@ class CanvasBackground {
     private blobs: Blob[] = []
     private animationTime = 0
     private lastTime = 0
-    private lastDt = 16
+    private lastDt = INITIAL_FRAME_DELTA_MS
     private rafId = 0
     private resizeObserver: ResizeObserver | null = null
     private coverObserver: MutationObserver | null = null
 
-    private settings: { enabled: boolean; showFps: boolean } = { enabled: true, showFps: false }
+    private settings: AddonRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS }
     private basePalette: string[] = []
     private disabled = false
 
@@ -130,8 +194,8 @@ class CanvasBackground {
     private fpsFrames = 0
     private fpsLastSampleTime = 0
 
-    private backgroundColor: string = '#050505'
-    private targetBackgroundColor: string = '#050505'
+    private backgroundColor: string = INITIAL_BACKGROUND_COLOR
+    private targetBackgroundColor: string = INITIAL_BACKGROUND_COLOR
     private backgroundMix: number = 1
 
     private coverRequestId = 0
@@ -139,7 +203,7 @@ class CanvasBackground {
     private coverDebounceTimer: number | null = null
     private pendingCoverSrc: string | null = null
 
-    constructor(container: HTMLElement, initialSettings?: { enabled: boolean; showFps: boolean }) {
+    constructor(container: HTMLElement, initialSettings?: Partial<AddonRuntimeSettings>) {
         this.container = container
         this.canvas = document.createElement('canvas')
         this.canvas.className = 'c2a-canvas-bg'
@@ -159,7 +223,7 @@ class CanvasBackground {
         // ранее сохранил showFps=true в pulsesync.settings.json, FPS-счётчик
         // должен появиться сразу, без необходимости тогглать чекбокс.
         if (initialSettings) {
-            this.settings = { enabled: initialSettings.enabled, showFps: initialSettings.showFps }
+            this.settings = sanitizeSettings(initialSettings)
         }
 
         if (!this.settings.enabled) {
@@ -184,7 +248,7 @@ class CanvasBackground {
 
         // Сразу создаём blob'ы с дефолтной палитрой, чтобы анимация появилась мгновенно,
         // не дожидаясь загрузки обложки через CORS-Image.
-        const initialDominant = this.darken(FALLBACK_PALETTE[0], BG_LIGHTNESS)
+        const initialDominant = this.darken(FALLBACK_PALETTE[0], this.settings.bgLightness)
         this.applyPalette(FALLBACK_PALETTE, initialDominant)
 
         const initial = this.findCover()
@@ -328,7 +392,7 @@ class CanvasBackground {
         this.fpsLastSampleTime = time
     }
 
-    private createBlobTexture(color: string, size = 512): HTMLCanvasElement {
+    private createBlobTexture(color: string, size = BLOB_TEXTURE_SIZE_PX): HTMLCanvasElement {
         const c = document.createElement('canvas')
         c.width = size
         c.height = size
@@ -341,9 +405,9 @@ class CanvasBackground {
         // Ядро блоба делаем alpha=0xcc (≈0.8) вместо 0xff (1.0): при слиянии
         // 3-4 блобов под source-over пиковая сумма альф остаётся < 1.0, цвет
         // не клиппится и зона наложения сохраняет палитру обложки.
-        gradient.addColorStop(0, color + 'cc')
-        gradient.addColorStop(0.5, color + '99')
-        gradient.addColorStop(1, color + '00')
+        gradient.addColorStop(0, color + BLOB_TEXTURE_ALPHA_CORE)
+        gradient.addColorStop(0.5, color + BLOB_TEXTURE_ALPHA_MID)
+        gradient.addColorStop(1, color + BLOB_TEXTURE_ALPHA_EDGE)
 
         x.fillStyle = gradient
         x.fillRect(0, 0, size, size)
@@ -353,16 +417,28 @@ class CanvasBackground {
     private createBlobs(colors: string[]): void {
         this.blobs = []
         const isMobile = window.innerWidth < MOBILE_BREAKPOINT_PX
+        // blobCountMin приходит из настроек PulseSync, BLOB_COUNT_MAX — производное
+        // (×2 от MIN), чтобы десктопная плотность blob'ов всегда была в 2× от мобильной.
+        const minCount = this.settings.blobCountMin
+        const maxCount = minCount * 2
         const count = isMobile
-            ? BLOB_COUNT_MIN
-            : Math.max(BLOB_COUNT_MIN, Math.min(BLOB_COUNT_MAX, Math.floor(window.innerWidth / BLOB_COUNT_DIVISOR_PX)))
+            ? minCount
+            : Math.max(minCount, Math.min(maxCount, Math.floor(window.innerWidth / BLOB_COUNT_DIVISOR_PX)))
         const width = this.container.clientWidth || window.innerWidth
         const height = this.container.clientHeight || window.innerHeight
 
         const radiusRange = BLOB_RADIUS_MAX - BLOB_RADIUS_MIN
         const orbitRange = BLOB_ORBIT_MAX - BLOB_ORBIT_MIN
-        const driftRange = BLOB_SPEED_DRIFT_MAX - BLOB_SPEED_DRIFT_MIN
-        const pulseSpeedRange = BLOB_SPEED_PULSE_MAX - BLOB_SPEED_PULSE_MIN
+        // blobSpeed из настроек PulseSync — множитель к базовым диапазонам.
+        // При 1.0 диапазоны дрейфа/пульсации совпадают со «старыми» константами,
+        // при 4 — blob'ы носятся в 4 раза быстрее.
+        const speedScale = this.settings.blobSpeed
+        const driftMin = BLOB_SPEED_DRIFT_MIN * speedScale
+        const driftMax = BLOB_SPEED_DRIFT_MAX * speedScale
+        const pulseMin = BLOB_SPEED_PULSE_MIN * speedScale
+        const pulseMax = BLOB_SPEED_PULSE_MAX * speedScale
+        const driftRange = driftMax - driftMin
+        const pulseSpeedRange = pulseMax - pulseMin
 
         for (let i = 0; i < count; i++) {
             const color = colors[i % colors.length]
@@ -379,15 +455,15 @@ class CanvasBackground {
                 orbitY: BLOB_ORBIT_MIN + Math.random() * orbitRange,
                 phaseX: Math.random() * Math.PI * 2,
                 phaseY: Math.random() * Math.PI * 2,
-                speedX: BLOB_SPEED_DRIFT_MIN + Math.random() * driftRange,
-                speedY: BLOB_SPEED_DRIFT_MIN + Math.random() * driftRange,
+                speedX: driftMin + Math.random() * driftRange,
+                speedY: driftMin + Math.random() * driftRange,
                 pulsePhase: Math.random() * Math.PI * 2,
-                pulseSpeed: BLOB_SPEED_PULSE_MIN + Math.random() * pulseSpeedRange,
+                pulseSpeed: pulseMin + Math.random() * pulseSpeedRange,
                 colorMix: 1,
                 colorOffset: (i / count) * PALETTE_WAVE_SPREAD,
             })
         }
-        log(`created ${this.blobs.length} blobs from palette`, colors)
+        log(`created ${this.blobs.length} blobs from palette (speedScale=${speedScale})`, colors)
     }
 
     private updatePalette(colors: string[]): void {
@@ -485,10 +561,22 @@ class CanvasBackground {
         )
     }
 
-    private updateBlobs(dt: number): void {
+    // Эффективное время бленда = paletteFadeMs / paletteBlendSpeed.
+// paletteFadeMs — полная длительность при скорости 1, paletteBlendSpeed —
+// множитель (>1 быстрее, <1 медленнее). При fade=0 бленд мгновенный (dt/0 = Infinity → colorMix сразу 1).
+private get effectiveFadeMs(): number {
+        const fade = this.settings.paletteFadeMs
+        if (fade <= 0) {
+            return 0.001
+        }
+        return fade / Math.max(0.01, this.settings.paletteBlendSpeed)
+}
+
+private updateBlobs(dt: number): void {
         this.animationTime += dt
         const width = this.container.clientWidth || window.innerWidth
         const height = this.container.clientHeight || window.innerHeight
+        const fadeMs = this.effectiveFadeMs
 
         for (const blob of this.blobs) {
             blob.baseX = Math.min(Math.max(blob.baseX, 0), width)
@@ -496,12 +584,12 @@ class CanvasBackground {
 
             blob.currentRadius = blob.radius + Math.sin(this.animationTime * blob.pulseSpeed + blob.pulsePhase) * BLOB_PULSE_AMPLITUDE
 
-            // colorMix накапливает «прошедшее время» бленда в долях от PALETTE_FADE_MS.
+            // colorMix накапливает «прошедшее время» бленда в долях от effectiveFadeMs.
             // colorOffset разносит старт бленда по blob'ам, чтобы переход шёл волной.
             // Текстура больше НЕ пересоздаётся на каждом кадре — бленд идёт через
             // наложение previousTexture и texture в draw() с globalAlpha = 1-t / t.
             if (blob.color !== blob.targetColor) {
-                blob.colorMix = Math.min(1, blob.colorMix + dt / PALETTE_FADE_MS)
+                blob.colorMix = Math.min(1, blob.colorMix + dt / fadeMs)
                 if (blob.colorMix >= 1) {
                     // Бленд завершён — фиксируем целевой цвет, освобождаем previousTexture.
                     blob.color = blob.targetColor
@@ -516,9 +604,9 @@ class CanvasBackground {
         const height = this.container.clientHeight || window.innerHeight
 
         // Закрашиваем canvas фоном, плавно переходящим из старого доминирующего
-        // цвета в новый за PALETTE_FADE_MS — синхронно с блендом blob'ов.
+        // цвета в новый за effectiveFadeMs — синхронно с блендом blob'ов.
         if (this.backgroundColor !== this.targetBackgroundColor) {
-            this.backgroundMix = Math.min(1, this.backgroundMix + this.lastDt / PALETTE_FADE_MS)
+            this.backgroundMix = Math.min(1, this.backgroundMix + this.lastDt / this.effectiveFadeMs)
             const rawT = this.backgroundMix * this.backgroundMix * (3 - 2 * this.backgroundMix)
             this.backgroundColor = this.blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
             if (this.backgroundMix >= 1) {
@@ -530,7 +618,7 @@ class CanvasBackground {
 
         this.ctx.save()
         this.ctx.translate(width / 2, height / 2)
-        this.ctx.rotate(time * 0.00001)
+        this.ctx.rotate(time * CANVAS_ROTATION_RAD_PER_MS)
         this.ctx.translate(-width / 2, -height / 2)
 
         // Раньше стоял 'lighter' (аддитивное смешивание): при наложении 3-4
@@ -663,14 +751,14 @@ class CanvasBackground {
             return FALLBACK_PALETTE[0]
         }
         try {
-            const W = img.naturalWidth || 800
-            const H = img.naturalHeight || 800
+            const W = img.naturalWidth || COVER_DEFAULT_SIZE_PX
+            const H = img.naturalHeight || COVER_DEFAULT_SIZE_PX
             c.width = W
             c.height = H
             x.drawImage(img, 0, 0, W, H)
             const data = x.getImageData(0, 0, W, H).data
             const totalPixels = W * H
-            const step = Math.max(1, Math.floor(Math.sqrt(totalPixels / 4000)))
+            const step = Math.max(1, Math.floor(Math.sqrt(totalPixels / COVER_SAMPLE_TARGET_COUNT)))
             let rSum = 0
             let gSum = 0
             let bSum = 0
@@ -704,8 +792,8 @@ class CanvasBackground {
         try {
             // Берём полный размер обложки — без downscale. Шаг STEP подбираем так,
             // чтобы общее число сэмплов было в районе ~2000–4000 (быстро и достаточно).
-            const W = img.naturalWidth || 800
-            const H = img.naturalHeight || 800
+            const W = img.naturalWidth || COVER_DEFAULT_SIZE_PX
+            const H = img.naturalHeight || COVER_DEFAULT_SIZE_PX
             c.width = W
             c.height = H
             x.drawImage(img, 0, 0, W, H)
@@ -713,7 +801,7 @@ class CanvasBackground {
 
             // Шаг между сэмплами — максимум ~4000 точек по всей картинке.
             const totalPixels = W * H
-            const step = Math.max(1, Math.floor(Math.sqrt(totalPixels / 4000)))
+            const step = Math.max(1, Math.floor(Math.sqrt(totalPixels / COVER_SAMPLE_TARGET_COUNT)))
 
             // Каждая ячейка = один сэмпл пикселя, её «вес» — 1 пиксель.
             // Сетка по ВСЕЙ картинке: идём по строкам/столбцам с шагом step,
@@ -742,7 +830,7 @@ class CanvasBackground {
             // Склеиваем близкие цвета (d² в RGB < 4900, ≈70 на канал), суммируя веса.
             // Порог подобран так, чтобы джиттер JPEG/антиалиасинга не плодил
             // ложные кластеры, но разные оттенки (коричневый vs чёрный) не сливались.
-            const MERGE_DIST_SQ = 70 * 70
+            const MERGE_DIST_SQ = CLUSTER_MERGE_RGB_DIST * CLUSTER_MERGE_RGB_DIST
             type Cluster = { r: number; g: number; b: number; weight: number }
             const clusters: Cluster[] = []
             for (const cell of cells) {
@@ -772,7 +860,7 @@ class CanvasBackground {
 
             clusters.sort((a, b) => b.weight - a.weight)
 
-            const colors = clusters.slice(0, 6).map(cl => this.rgbToHex(Math.round(cl.r), Math.round(cl.g), Math.round(cl.b)))
+            const colors = clusters.slice(0, EXTRACTED_PALETTE_SIZE).map(cl => this.rgbToHex(Math.round(cl.r), Math.round(cl.g), Math.round(cl.b)))
 
             log('extracted colors from cover', colors)
             return colors
@@ -854,7 +942,7 @@ class CanvasBackground {
             // Топ-1 кластер может быть случайным акцентом в углу (иконка лейбла и т.п.),
             // а средний цвет корректно отражает обложку в целом (белый/чёрный/бежевый → серый).
             const rawDominant = this.averageColor(corsImage)
-            const dominant = this.darken(rawDominant, BG_LIGHTNESS)
+            const dominant = this.darken(rawDominant, this.settings.bgLightness)
             this.applyPalette(base, dominant)
             this.lastAppliedSrc = src
         }
@@ -864,7 +952,7 @@ class CanvasBackground {
             }
             warn(`applyCover: CORS load failed for ${src}, using fallback palette`)
             this.basePalette = [...FALLBACK_PALETTE]
-            const dominant = this.darken(FALLBACK_PALETTE[0], BG_LIGHTNESS)
+            const dominant = this.darken(FALLBACK_PALETTE[0], this.settings.bgLightness)
             this.applyPalette(FALLBACK_PALETTE, dominant)
             this.lastAppliedSrc = src
         }
@@ -934,27 +1022,69 @@ class CanvasBackground {
         return img.currentSrc || img.src || ''
     }
 
-    applySettings(settings: { enabled: boolean; showFps: boolean }): void {
-        this.settings = { enabled: settings.enabled, showFps: settings.showFps }
+    applySettings(settings: Partial<AddonRuntimeSettings>): void {
+        const next = sanitizeSettings(settings)
+        const prev = this.settings
 
-        // Переключаем видимость FPS-счётчика. Сам DOM-узел уже создан в конструкторе,
-        // здесь только меняем display — без пересоздания элемента и потери счётчика.
-        if (this.fpsElement) {
-            this.fpsElement.style.display = this.settings.showFps ? 'block' : 'none'
-            log(`applySettings: fps counter ${this.settings.showFps ? 'shown' : 'hidden'}`)
+        // FPS-переключатель применяем ДО общего merge — чтобы UI среагировал,
+        // даже если остальные поля не менялись.
+        if (this.fpsElement && next.showFps !== prev.showFps) {
+            this.fpsElement.style.display = next.showFps ? 'block' : 'none'
+            log(`applySettings: fps counter ${next.showFps ? 'shown' : 'hidden'}`)
         }
 
-        if (this.disabled && this.settings.enabled) {
-            // Если аддон был выключен, и пользователь включил его — ничего не делаем.
-            // Полная переинициализация потребует перезагрузки модалки.
+        // Если аддон был выключен и пользователь включает его — мы не можем
+        // «оживить» canvas, потому что constructor уже отработал. Полная
+        // переинициализация произойдёт при переоткрытии модалки.
+        if (this.disabled && next.enabled) {
             log('applySettings: addon re-enabled; reopen player to apply')
             return
         }
 
-        if (!this.settings.enabled && !this.disabled) {
+        if (!next.enabled && !this.disabled) {
             this.disabled = true
             log('applySettings: addon disabled by user')
             return
+        }
+
+        // bgLightness применяем на лету: пересчитываем targetBackgroundColor
+        // через darken, и если бленд в процессе — блендим со старого фона.
+        const bgChanged = next.bgLightness !== prev.bgLightness
+        if (bgChanged && this.basePalette.length > 0) {
+            // Берём текущий отображаемый фон как «rawDominant» и применяем новую яркость.
+            // Исходный цвет обложки не сохраняли, но среднее от уже отрисованного фона
+            // (this.backgroundColor) близко к нему — для UI-ползунка «яркость» этого
+            // достаточно, иначе пришлось бы хранить rawDominant отдельно.
+            const currentHue = this.backgroundColor
+            this.backgroundColor = this.targetBackgroundColor
+            this.targetBackgroundColor = this.darken(currentHue, next.bgLightness)
+            this.backgroundMix = 0
+            log(`applySettings: bgLightness changed → ${next.bgLightness}`)
+        }
+
+        const blobCountChanged = next.blobCountMin !== prev.blobCountMin
+        const blobSpeedChanged = next.blobSpeed !== prev.blobSpeed
+
+        this.settings = next
+
+        if ((blobCountChanged || blobSpeedChanged) && this.blobs.length > 0) {
+            this.recreateBlobs()
+            log(`applySettings: blobs recreated (countMin=${next.blobCountMin}, speed=${next.blobSpeed})`)
+        }
+    }
+
+    // Пересоздаёт blob'ы с текущей палитрой и обновлёнными blobCount/blobSpeed.
+    // Используется при изменении настроек на лету — без сброса backgroundColor
+    // и без перезапроса обложки.
+    private recreateBlobs(): void {
+        const palette = this.basePalette.length > 0 ? this.basePalette : FALLBACK_PALETTE
+        this.createBlobs(palette)
+        // Если в момент смены шёл бленд — сбрасываем previousTexture у всех blob'ов,
+        // иначе draw() попытается интерполировать между текстурой старого цвета и
+        // только что созданной текстурой (palette успела примениться).
+        for (const blob of this.blobs) {
+            blob.previousTexture = null
+            blob.colorMix = 1
         }
     }
 
@@ -1036,12 +1166,13 @@ function ensureBackground(): void {
         // FPS-узел должен появиться сразу при открытии модалки — без
         // промежуточного состояния "модалка открыта, FPS скрыт, потом
         // моргнул и появился после первой смены настроек".
-        const settingsStore = getAddonSettings(addonConfig.name)
-        const currentSettings = settingsStore.getCurrent()
-        const enabled = readBooleanSetting(currentSettings, 'enabled', true)
-        const showFps = readBooleanSetting(currentSettings, 'showFps', false)
-        log(`ensureBackground: initial settings enabled=${enabled}, showFps=${showFps}`)
-        backgroundInstance = new CanvasBackground(container, { enabled, showFps })
+        const runtime = readRuntimeSettings()
+        log(
+            `ensureBackground: initial settings enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
+                `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
+                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}`,
+        )
+        backgroundInstance = new CanvasBackground(container, runtime)
         clearRetry()
         retriesLeft = MAX_RETRIES
     } catch (err) {
@@ -1089,14 +1220,27 @@ function anyAddedNodeMatches(nodes: NodeList, selector: string): boolean {
 }
 
 function watchModal(): void {
-    // Подписка на настройки аддона: при изменении чекбокса в UI PulseSync
+    // Подписка на настройки аддона: при изменении любой настройки в UI PulseSync
     // применяем новые значения к текущему instance (если он создан).
     const settingsStore = getAddonSettings(addonConfig.name)
     settingsStore.onChange(nextSettings => {
-        const enabled = readBooleanSetting(nextSettings, 'enabled', true)
-        const showFps = readBooleanSetting(nextSettings, 'showFps', false)
-        log(`settings changed: enabled=${enabled}, showFps=${showFps}`)
-        backgroundInstance?.applySettings({ enabled, showFps })
+        const runtime = {
+            enabled: readBooleanSetting(nextSettings, SETTING_KEY_ENABLED, DEFAULT_RUNTIME_SETTINGS.enabled),
+            showFps: readBooleanSetting(nextSettings, SETTING_KEY_SHOW_FPS, DEFAULT_RUNTIME_SETTINGS.showFps),
+            paletteFadeMs: readNumberSetting(nextSettings, SETTING_KEY_PALETTE_FADE_MS, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
+            paletteBlendSpeed: readNumberSetting(
+                nextSettings,
+                SETTING_KEY_PALETTE_BLEND_SPEED,
+                DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed,
+            ),
+            blobCountMin: readNumberSetting(nextSettings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
+            blobSpeed: readNumberSetting(nextSettings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
+            bgLightness: readNumberSetting(nextSettings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
+        }
+        log(`settings changed: enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
+            `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
+            `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}`)
+        backgroundInstance?.applySettings(runtime)
     })
 
     ensureBackground()
