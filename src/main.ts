@@ -1,5 +1,8 @@
 import './styles.css'
 
+import addonConfig from '../addon.config.mjs'
+import { getAddonSettings, readBooleanSetting } from './pulsesync'
+
 const MODAL_SELECTOR = 'div[data-test-id="FULLSCREEN_PLAYER_MODAL"]'
 const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT"]'
 const COVER_SELECTOR = 'img[data-test-id="ENTITY_COVER_IMAGE"]'
@@ -55,6 +58,11 @@ const RETRY_DELAY_MS = 1500
 const MAX_RETRIES = 100
 const PALETTE_POLL_MS = 20000
 const COVER_DEBOUNCE_MS = 5000
+
+// FPS-счётчик обновляет textContent не каждый кадр, а раз в этот интервал —
+// иначе reflow DOM будет съедать несколько процентов производительности,
+// а на 60 fps значения всё равно меняются слишком быстро для глаза.
+const FPS_UPDATE_INTERVAL_MS = 500
 
 const LOG_PREFIX = '[Cover2Anim]'
 
@@ -115,9 +123,13 @@ class CanvasBackground {
     private coverObserver: MutationObserver | null = null
     private palettePollTimer: number | null = null
 
-    private settings: { enabled: boolean } = { enabled: true }
+    private settings: { enabled: boolean; showFps: boolean } = { enabled: true, showFps: false }
     private basePalette: string[] = []
     private disabled = false
+
+    private fpsElement: HTMLDivElement | null = null
+    private fpsFrames = 0
+    private fpsLastSampleTime = 0
 
     private backgroundColor: string = '#050505'
     private targetBackgroundColor: string = '#050505'
@@ -131,10 +143,10 @@ class CanvasBackground {
     private recentPalettes: string[][] = []
     private static readonly RECENT_PALETTES_MAX = 3
 
-    constructor(container: HTMLElement) {
+    constructor(container: HTMLElement, initialSettings?: { enabled: boolean; showFps: boolean }) {
         this.container = container
         this.canvas = document.createElement('canvas')
-        this.canvas.className = 'betterplayer-canvas-bg'
+        this.canvas.className = 'c2a-canvas-bg'
         const ctx = this.canvas.getContext('2d')
         if (!ctx) {
             const isConnected = container.isConnected
@@ -147,6 +159,13 @@ class CanvasBackground {
         }
         this.ctx = ctx
 
+        // Применяем переданные настройки до проверки enabled: если пользователь
+        // ранее сохранил showFps=true в pulsesync.settings.json, FPS-счётчик
+        // должен появиться сразу, без необходимости тогглать чекбокс.
+        if (initialSettings) {
+            this.settings = { enabled: initialSettings.enabled, showFps: initialSettings.showFps }
+        }
+
         if (!this.settings.enabled) {
             this.disabled = true
             log('background disabled by setting')
@@ -156,6 +175,7 @@ class CanvasBackground {
         this.container.insertBefore(this.canvas, this.container.firstChild)
         this.container.classList.add('canvas-mode')
 
+        this.createFpsElement()
         this.resize()
         this.startAnimation()
 
@@ -197,6 +217,13 @@ class CanvasBackground {
         window.removeEventListener('resize', this.onWindowResize)
         this.container.classList.remove('canvas-mode')
         this.canvas.remove()
+        if (this.fpsElement) {
+            this.fpsElement.remove()
+            this.fpsElement = null
+            log('fps element removed')
+        }
+        this.fpsFrames = 0
+        this.fpsLastSampleTime = 0
     }
 
     isContainerAlive(): boolean {
@@ -267,9 +294,44 @@ class CanvasBackground {
             this.lastDt = dt
             this.updateBlobs(dt)
             this.draw(time)
+            this.tickFps(time)
             this.rafId = requestAnimationFrame(loop)
         }
         this.rafId = requestAnimationFrame(loop)
+    }
+
+    private createFpsElement(): void {
+        // DOM-узел создаётся один раз. CSS-стили (.c2a-fps) лежат в
+        // src/styles.css — здесь только позиционирование и начальная видимость.
+        const el = document.createElement('div')
+        el.className = 'c2a-fps'
+        el.textContent = '— FPS'
+        el.style.display = this.settings.showFps ? 'block' : 'none'
+        this.container.appendChild(el)
+        this.fpsElement = el
+        // Сбрасываем счётчик, чтобы первая секунда не считалась от нуля.
+        this.fpsFrames = 0
+        this.fpsLastSampleTime = 0
+    }
+
+    private tickFps(time: number): void {
+        if (!this.fpsElement) {
+            return
+        }
+        this.fpsFrames += 1
+        if (this.fpsLastSampleTime === 0) {
+            // Первый кадр — фиксируем точку отсчёта, sample посчитаем следующим.
+            this.fpsLastSampleTime = time
+            return
+        }
+        const elapsed = time - this.fpsLastSampleTime
+        if (elapsed < FPS_UPDATE_INTERVAL_MS) {
+            return
+        }
+        const fps = (this.fpsFrames * 1000) / elapsed
+        this.fpsElement.textContent = `${Math.round(fps)} FPS`
+        this.fpsFrames = 0
+        this.fpsLastSampleTime = time
     }
 
     private createBlobTexture(color: string, size = 512): HTMLCanvasElement {
@@ -859,8 +921,15 @@ class CanvasBackground {
         return img.currentSrc || img.src || ''
     }
 
-    applySettings(settings: { enabled: boolean }): void {
-        this.settings = { enabled: settings.enabled }
+    applySettings(settings: { enabled: boolean; showFps: boolean }): void {
+        this.settings = { enabled: settings.enabled, showFps: settings.showFps }
+
+        // Переключаем видимость FPS-счётчика. Сам DOM-узел уже создан в конструкторе,
+        // здесь только меняем display — без пересоздания элемента и потери счётчика.
+        if (this.fpsElement) {
+            this.fpsElement.style.display = this.settings.showFps ? 'block' : 'none'
+            log(`applySettings: fps counter ${this.settings.showFps ? 'shown' : 'hidden'}`)
+        }
 
         if (this.disabled && this.settings.enabled) {
             // Если аддон был выключен, и пользователь включил его — ничего не делаем.
@@ -1056,7 +1125,17 @@ function ensureBackground(): void {
         return
     }
     try {
-        backgroundInstance = new CanvasBackground(container)
+        // Читаем текущие настройки аддона и передаём их в конструктор.
+        // Если пользователь заранее включил showFps=true в UI PulseSync,
+        // FPS-узел должен появиться сразу при открытии модалки — без
+        // промежуточного состояния "модалка открыта, FPS скрыт, потом
+        // моргнул и появился после первой смены настроек".
+        const settingsStore = getAddonSettings(addonConfig.name)
+        const currentSettings = settingsStore.getCurrent()
+        const enabled = readBooleanSetting(currentSettings, 'enabled', true)
+        const showFps = readBooleanSetting(currentSettings, 'showFps', false)
+        log(`ensureBackground: initial settings enabled=${enabled}, showFps=${showFps}`)
+        backgroundInstance = new CanvasBackground(container, { enabled, showFps })
         clearRetry()
         retriesLeft = MAX_RETRIES
     } catch (err) {
@@ -1104,6 +1183,16 @@ function anyAddedNodeMatches(nodes: NodeList, selector: string): boolean {
 }
 
 function watchModal(): void {
+    // Подписка на настройки аддона: при изменении чекбокса в UI PulseSync
+    // применяем новые значения к текущему instance (если он создан).
+    const settingsStore = getAddonSettings(addonConfig.name)
+    settingsStore.onChange(nextSettings => {
+        const enabled = readBooleanSetting(nextSettings, 'enabled', true)
+        const showFps = readBooleanSetting(nextSettings, 'showFps', false)
+        log(`settings changed: enabled=${enabled}, showFps=${showFps}`)
+        backgroundInstance?.applySettings({ enabled, showFps })
+    })
+
     ensureBackground()
 
     // Срабатываем только при реальном появлении/исчезновении модалки или обложки.

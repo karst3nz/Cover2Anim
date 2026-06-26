@@ -3,7 +3,7 @@ div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
     z-index: -1 !important;
 }
 
-.betterplayer-canvas-bg {
+.c2a-canvas-bg {
     position: absolute;
     top: 0;
     left: 0;
@@ -14,7 +14,25 @@ div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
     background: #000;
 }
 
-div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode > *:not(.betterplayer-canvas-bg) {
+div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode
+    > *:not(.c2a-canvas-bg):not(.c2a-fps) {
     position: relative;
     z-index: 1;
+}
+
+.c2a-fps {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 10;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.45);
+    color: rgba(255, 255, 255, 0.85);
+    font: 12px/1 ui-monospace, "SFMono-Regular", "Menlo", monospace;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    visibility: visible;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
 }
