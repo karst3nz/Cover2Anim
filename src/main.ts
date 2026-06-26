@@ -14,6 +14,7 @@ const BG_LIGHTNESS = 0.18
 const RETRY_DELAY_MS = 1500
 const MAX_RETRIES = 100
 const PALETTE_POLL_MS = 100000
+const COVER_DEBOUNCE_MS = 400
 
 const LOG_PREFIX = '[Cover2Anim]'
 
@@ -83,6 +84,8 @@ class CanvasBackground {
 
     private coverRequestId = 0
     private lastAppliedSrc: string | null = null
+    private coverDebounceTimer: number | null = null
+    private pendingCoverSrc: string | null = null
     private recentPalettes: string[][] = []
     private static readonly RECENT_PALETTES_MAX = 3
 
@@ -141,6 +144,11 @@ class CanvasBackground {
             window.clearInterval(this.palettePollTimer)
             this.palettePollTimer = null
             log('palette poll timer stopped')
+        }
+        if (this.coverDebounceTimer !== null) {
+            window.clearTimeout(this.coverDebounceTimer)
+            this.coverDebounceTimer = null
+            log('cover debounce timer stopped')
         }
         this.resizeObserver?.disconnect()
         this.coverObserver?.disconnect()
@@ -627,12 +635,32 @@ class CanvasBackground {
     }
 
     private applyCover(img: HTMLImageElement): void {
-        const src = img.currentSrc || img.src
+        const src = this.pickCoverUrl(img)
         if (!src) {
             warn('applyCover: cover image has no src, skipping')
             return
         }
 
+        // Debounce: карусели/превью часто меняют src раз в 50–200 мс.
+        // Если бы запускали CORS-загрузку на каждое изменение, получили бы
+        // десятки параллельных HTTP-запросов. Ждём COVER_DEBOUNCE_MS «тишины»
+        // и грузим только последнюю обложку.
+        this.pendingCoverSrc = src
+        if (this.coverDebounceTimer !== null) {
+            window.clearTimeout(this.coverDebounceTimer)
+        }
+        this.coverDebounceTimer = window.setTimeout(() => {
+            this.coverDebounceTimer = null
+            const pending = this.pendingCoverSrc
+            this.pendingCoverSrc = null
+            if (!pending) {
+                return
+            }
+            this.loadCover(pending)
+        }, COVER_DEBOUNCE_MS)
+    }
+
+    private loadCover(src: string): void {
         const requestId = ++this.coverRequestId
         const corsImage = new Image()
         corsImage.crossOrigin = 'anonymous'
@@ -670,6 +698,52 @@ class CanvasBackground {
         const scope = this.container.matches(MODAL_SELECTOR) ? this.container : (this.container.querySelector(MODAL_SELECTOR) ?? document)
         const img = scope.querySelector(COVER_SELECTOR)
         return img instanceof HTMLImageElement ? img : null
+    }
+
+    // Берём самый большой URL из srcset (обычно это 2x версия), иначе src.
+    // srcset имеет формат "url 400x400, url 2x" или "url 1x, url 2x".
+    private pickCoverUrl(img: HTMLImageElement): string {
+        const srcset = img.srcset || img.getAttribute('srcset') || ''
+        if (srcset) {
+            const candidates = srcset
+                .split(',')
+                .map(part => part.trim())
+                .filter(Boolean)
+                .map(part => {
+                    const [url, descriptor] = part.split(/\s+/, 2)
+                    return { url, descriptor: descriptor ?? '' }
+                })
+                .filter(c => c.url)
+
+            // 1. Предпочитаем дескриптор с пикселями (например, "800x800")
+            const byPixels = candidates
+                .map(c => {
+                    const match = /(\d+)w/.exec(c.descriptor)
+                    const pixels = match ? Number(match[1]) : 0
+                    return { url: c.url, pixels }
+                })
+                .filter(c => c.pixels > 0)
+                .sort((a, b) => b.pixels - a.pixels)
+            if (byPixels.length > 0) {
+                return byPixels[0].url
+            }
+
+            // 2. Иначе берём дескриптор с плотностью (например, "2x")
+            const byDensity = candidates
+                .map(c => {
+                    const match = /^([\d.]+)x$/.exec(c.descriptor)
+                    const density = match ? Number(match[1]) : 1
+                    return { url: c.url, density }
+                })
+                .sort((a, b) => b.density - a.density)
+            if (byDensity.length > 0 && byDensity[0].density > 1) {
+                return byDensity[0].url
+            }
+
+            // 3. Иначе последний URL в srcset (обычно самый большой)
+            return candidates[candidates.length - 1].url
+        }
+        return img.currentSrc || img.src || ''
     }
 
     applySettings(settings: { enabled: boolean }): void {
@@ -732,7 +806,7 @@ class CanvasBackground {
             log('pollCover: no cover image found')
             return
         }
-        const src = img.currentSrc || img.src
+        const src = this.pickCoverUrl(img)
         if (!src) {
             log('pollCover: cover image has no src')
             return
