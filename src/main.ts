@@ -1,20 +1,60 @@
 import './styles.css'
 
 const MODAL_SELECTOR = 'div[data-test-id="FULLSCREEN_PLAYER_MODAL"]'
+const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT"]'
 const COVER_SELECTOR = 'img[data-test-id="ENTITY_COVER_IMAGE"]'
 
 const FALLBACK_PALETTE = ['#ff3366', '#ff8800', '#ffcc00', '#00ccff', '#4466ff', '#aa00ff']
 
+// Время (мс) полного бленда палитры blob'ов и фона при смене обложки.
 const PALETTE_FADE_MS = 1000
 
 // Целевая лёгкость (HSL L) для фонового цвета: 0 = чёрный, 1 = белый.
 // 0.18 — тёмный, но с различимым оттенком обложки, UI поверх остаётся читаемым.
 const BG_LIGHTNESS = 0.18
 
+// Ширина viewport (px), ниже которой применяются «мобильные» пресеты блюра и числа blob'ов.
+const MOBILE_BREAKPOINT_PX = 768
+
+// --- Blob'ы: количество ---
+const BLOB_COUNT_MIN = 24
+const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
+// Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
+const BLOB_COUNT_DIVISOR_PX = 180
+
+// --- Blob'ы: радиус (базовый, без пульсации) ---
+const BLOB_RADIUS_MIN = 250
+const BLOB_RADIUS_MAX = 500
+// Стартовое значение currentRadius до первого updateBlobs (выровнено по середине диапазона).
+const BLOB_RADIUS_INITIAL = 300
+
+// --- Blob'ы: амплитуда пульсации радиуса ---
+const BLOB_PULSE_AMPLITUDE = 80
+
+// --- Blob'ы: орбита (амплитуда колебаний baseX/baseY) ---
+const BLOB_ORBIT_MIN = 150
+const BLOB_ORBIT_MAX = 650
+
+// --- Blob'ы: скорости ---
+// Дрейф X/Y: множитель t в sin/cos, управляет «плавностью» перемещения.
+const BLOB_SPEED_DRIFT_MIN = 0.0001
+const BLOB_SPEED_DRIFT_MAX = 0.0004
+// Пульсация радиуса: множитель t в sin.
+const BLOB_SPEED_PULSE_MIN = 0.0003
+const BLOB_SPEED_PULSE_MAX = 0.0007
+
+// --- Blob'ы: волна бленда палитры ---
+// colorOffset распределяет старт бленда по blob'ам: colorOffset = (i / count) * WAVE_SPREAD.
+const PALETTE_WAVE_SPREAD = 0.8
+
+// --- Размытие canvas ---
+const BLUR_DESKTOP_PX = 100
+const BLUR_MOBILE_PX = 70
+
 const RETRY_DELAY_MS = 1500
 const MAX_RETRIES = 100
-const PALETTE_POLL_MS = 100000
-const COVER_DEBOUNCE_MS = 100000
+const PALETTE_POLL_MS = 20000
+const COVER_DEBOUNCE_MS = 5000
 
 const LOG_PREFIX = '[Cover2Anim]'
 
@@ -44,6 +84,7 @@ type Blob = {
     color: string
     targetColor: string
     texture: HTMLCanvasElement
+    previousTexture: HTMLCanvasElement | null
     baseX: number
     baseY: number
     radius: number
@@ -84,6 +125,7 @@ class CanvasBackground {
 
     private coverRequestId = 0
     private lastAppliedSrc: string | null = null
+    private pollFrozen = false
     private coverDebounceTimer: number | null = null
     private pendingCoverSrc: string | null = null
     private recentPalettes: string[][] = []
@@ -240,7 +282,10 @@ class CanvasBackground {
         }
 
         const gradient = x.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-        gradient.addColorStop(0, color + 'ff')
+        // Ядро блоба делаем alpha=0xcc (≈0.8) вместо 0xff (1.0): при слиянии
+        // 3-4 блобов под source-over пиковая сумма альф остаётся < 1.0, цвет
+        // не клиппится и зона наложения сохраняет палитру обложки.
+        gradient.addColorStop(0, color + 'cc')
         gradient.addColorStop(0.5, color + '99')
         gradient.addColorStop(1, color + '00')
 
@@ -251,9 +296,17 @@ class CanvasBackground {
 
     private createBlobs(colors: string[]): void {
         this.blobs = []
-        const count = Math.max(6, window.innerWidth < 768 ? 6 : Math.min(18, Math.floor(window.innerWidth / 180)))
+        const isMobile = window.innerWidth < MOBILE_BREAKPOINT_PX
+        const count = isMobile
+            ? BLOB_COUNT_MIN
+            : Math.max(BLOB_COUNT_MIN, Math.min(BLOB_COUNT_MAX, Math.floor(window.innerWidth / BLOB_COUNT_DIVISOR_PX)))
         const width = this.container.clientWidth || window.innerWidth
         const height = this.container.clientHeight || window.innerHeight
+
+        const radiusRange = BLOB_RADIUS_MAX - BLOB_RADIUS_MIN
+        const orbitRange = BLOB_ORBIT_MAX - BLOB_ORBIT_MIN
+        const driftRange = BLOB_SPEED_DRIFT_MAX - BLOB_SPEED_DRIFT_MIN
+        const pulseSpeedRange = BLOB_SPEED_PULSE_MAX - BLOB_SPEED_PULSE_MIN
 
         for (let i = 0; i < count; i++) {
             const color = colors[i % colors.length]
@@ -261,20 +314,21 @@ class CanvasBackground {
                 color,
                 targetColor: color,
                 texture: this.createBlobTexture(color),
+                previousTexture: null,
                 baseX: Math.random() * width,
                 baseY: Math.random() * height,
-                radius: 250 + Math.random() * 250,
-                currentRadius: 300,
-                orbitX: 150 + Math.random() * 500,
-                orbitY: 150 + Math.random() * 500,
+                radius: BLOB_RADIUS_MIN + Math.random() * radiusRange,
+                currentRadius: BLOB_RADIUS_INITIAL,
+                orbitX: BLOB_ORBIT_MIN + Math.random() * orbitRange,
+                orbitY: BLOB_ORBIT_MIN + Math.random() * orbitRange,
                 phaseX: Math.random() * Math.PI * 2,
                 phaseY: Math.random() * Math.PI * 2,
-                speedX: 0.0001 + Math.random() * 0.0003,
-                speedY: 0.0001 + Math.random() * 0.0003,
+                speedX: BLOB_SPEED_DRIFT_MIN + Math.random() * driftRange,
+                speedY: BLOB_SPEED_DRIFT_MIN + Math.random() * driftRange,
                 pulsePhase: Math.random() * Math.PI * 2,
-                pulseSpeed: 0.0003 + Math.random() * 0.0004,
+                pulseSpeed: BLOB_SPEED_PULSE_MIN + Math.random() * pulseSpeedRange,
                 colorMix: 1,
-                colorOffset: (i / count) * 0.8,
+                colorOffset: (i / count) * PALETTE_WAVE_SPREAD,
             })
         }
         log(`created ${this.blobs.length} blobs from palette`, colors)
@@ -316,8 +370,26 @@ class CanvasBackground {
             } else if (!used[bestIdx]) {
                 used[bestIdx] = true
             }
-            blob.targetColor = colors[bestIdx]
+
+            const newTargetColor = colors[bestIdx]
+            if (newTargetColor === blob.color) {
+                // Цвет не изменился — сбрасываем бленд, чистим previousTexture,
+                // чтобы draw() не рисовал фантомный слой.
+                blob.targetColor = newTargetColor
+                blob.colorMix = 1
+                blob.previousTexture = null
+                return
+            }
+
+            // Сохраняем текущую текстуру как «старую» — она будет постепенно
+            // угасать в draw() через globalAlpha = 1 - t. Один раз за весь
+            // переход, а не на каждом кадре.
+            blob.previousTexture = blob.texture
+            blob.targetColor = newTargetColor
             blob.colorMix = 0
+            // Новая текстура создаётся ровно один раз — до этого бленд
+            // опирается на previousTexture и новую текстуру.
+            blob.texture = this.createBlobTexture(newTargetColor)
         })
         log('palette updated', colors)
     }
@@ -354,21 +426,18 @@ class CanvasBackground {
             blob.baseX = Math.min(Math.max(blob.baseX, 0), width)
             blob.baseY = Math.min(Math.max(blob.baseY, 0), height)
 
-            blob.currentRadius = blob.radius + Math.sin(this.animationTime * blob.pulseSpeed + blob.pulsePhase) * 80
+            blob.currentRadius = blob.radius + Math.sin(this.animationTime * blob.pulseSpeed + blob.pulsePhase) * BLOB_PULSE_AMPLITUDE
 
+            // colorMix накапливает «прошедшее время» бленда в долях от PALETTE_FADE_MS.
+            // colorOffset разносит старт бленда по blob'ам, чтобы переход шёл волной.
+            // Текстура больше НЕ пересоздаётся на каждом кадре — бленд идёт через
+            // наложение previousTexture и texture в draw() с globalAlpha = 1-t / t.
             if (blob.color !== blob.targetColor) {
-                // colorMix накапливает «прошедшее время» бленда в долях от PALETTE_FADE_MS.
-                // colorOffset разносит старт бленда по blob'ам, чтобы переход шёл волной.
                 blob.colorMix = Math.min(1, blob.colorMix + dt / PALETTE_FADE_MS)
-                const rawT = Math.max(0, Math.min(1, blob.colorMix - blob.colorOffset))
-                // smoothstep: плавный старт и плавный финал, без линейного «разгона»
-                const t = rawT * rawT * (3 - 2 * rawT)
-                if (t > 0) {
-                    const currentColor = this.blendHex(blob.color, blob.targetColor, t)
-                    blob.texture = this.createBlobTexture(currentColor)
-                }
                 if (blob.colorMix >= 1) {
+                    // Бленд завершён — фиксируем целевой цвет, освобождаем previousTexture.
                     blob.color = blob.targetColor
+                    blob.previousTexture = null
                 }
             }
         }
@@ -396,19 +465,52 @@ class CanvasBackground {
         this.ctx.rotate(time * 0.00001)
         this.ctx.translate(-width / 2, -height / 2)
 
-        this.ctx.globalCompositeOperation = 'lighter'
-        this.ctx.filter = window.innerWidth < 768 ? 'blur(70px)' : 'blur(100px)'
+        // Раньше стоял 'lighter' (аддитивное смешивание): при наложении 3-4
+        // блобов RGB быстро упирался в 255 и зона слияния становилась чисто
+        // белой. 'source-over' использует alpha-compositing — пиксели смешиваются
+        // через альфу, итоговый цвет никогда не белее самого яркого блоба.
+        this.ctx.globalCompositeOperation = 'source-over'
+        this.ctx.filter = window.innerWidth < MOBILE_BREAKPOINT_PX ? `blur(${BLUR_MOBILE_PX}px)` : `blur(${BLUR_DESKTOP_PX}px)`
 
         const t = this.animationTime
         for (const blob of this.blobs) {
             const x = blob.baseX + Math.sin(t * blob.speedX + blob.phaseX) * blob.orbitX
             const y = blob.baseY + Math.cos(t * blob.speedY + blob.phaseY) * blob.orbitY
             const r = blob.currentRadius
-            this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+
+            // Плавный бленд между previousTexture и texture через globalAlpha.
+            // Раньше текстура пересоздавалась на каждом кадре через blendHex +
+            // createBlobTexture (до 32 новых offscreen-canvas на кадр в течение
+            // секунды), что вызывало рывки и GC-фризы. Теперь две текстуры
+            // накладываются с альфой — без аллокаций в горячем пути RAF.
+            if (blob.previousTexture) {
+                const rawT = Math.max(0, Math.min(1, blob.colorMix - blob.colorOffset))
+                // smoothstep: плавный старт и плавный финал, без линейного «разгона»
+                const blendT = rawT * rawT * (3 - 2 * rawT)
+                if (blendT <= 0) {
+                    // Ещё не дошла волна — рисуем только старую текстуру в полную альфу.
+                    this.ctx.globalAlpha = 1
+                    this.ctx.drawImage(blob.previousTexture, x - r, y - r, r * 2, r * 2)
+                } else if (blendT >= 1) {
+                    // Волна прошла полностью — рисуем только новую текстуру.
+                    this.ctx.globalAlpha = 1
+                    this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+                } else {
+                    // Переходная фаза: старая угасает, новая разгорается.
+                    this.ctx.globalAlpha = 1 - blendT
+                    this.ctx.drawImage(blob.previousTexture, x - r, y - r, r * 2, r * 2)
+                    this.ctx.globalAlpha = blendT
+                    this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+                }
+            } else {
+                this.ctx.globalAlpha = 1
+                this.ctx.drawImage(blob.texture, x - r, y - r, r * 2, r * 2)
+            }
         }
 
         this.ctx.restore()
         this.ctx.filter = 'none'
+        this.ctx.globalAlpha = 1
     }
 
     private rgbToHex(r: number, g: number, b: number): string {
@@ -695,8 +797,19 @@ class CanvasBackground {
     }
 
     private findCover(): HTMLImageElement | null {
-        const scope = this.container.matches(MODAL_SELECTOR) ? this.container : (this.container.querySelector(MODAL_SELECTOR) ?? document)
-        const img = scope.querySelector(COVER_SELECTOR)
+        // Строгий scope: ищем обложку ТОЛЬКО внутри блока постера в модалке плеера.
+        // Никаких fallback на document/модалку — иначе захватим обложку
+        // мини-плеера, превью плейлистов или других треков и перекрасим
+        // фон не тем треком.
+        const modal = this.container.matches(MODAL_SELECTOR) ? this.container : this.container.querySelector(MODAL_SELECTOR)
+        if (!modal) {
+            return null
+        }
+        const poster = modal.querySelector(POSTER_CONTENT_SELECTOR)
+        if (!poster) {
+            return null
+        }
+        const img = poster.querySelector(COVER_SELECTOR)
         return img instanceof HTMLImageElement ? img : null
     }
 
@@ -765,30 +878,46 @@ class CanvasBackground {
 
     private observeCover(): void {
         if (typeof MutationObserver !== 'undefined') {
-            const root = this.container.querySelector(MODAL_SELECTOR) ?? document.body
-            if (!root) {
-                warn('observeCover: no root element to observe')
+            // Строгий scope: наблюдаем ТОЛЬКО за блоком постера внутри модалки.
+            // Никаких fallback на document/body/модалку — иначе MutationObserver
+            // начнёт ловить смены src на чужих обложках (мини-плеер, превью
+            // плейлистов) и триггерить applyCover на чужие треки.
+            const modal = this.container.matches(MODAL_SELECTOR) ? this.container : this.container.querySelector(MODAL_SELECTOR)
+            if (!modal) {
+                warn('observeCover: modal not found, skipping observer (will retry via reconcileBackground)')
             } else {
-                this.coverObserver = new MutationObserver(records => {
-                    for (const record of records) {
-                        if (record.type !== 'attributes' || record.attributeName !== 'src') {
-                            continue
+                const root = modal.querySelector(POSTER_CONTENT_SELECTOR)
+                if (!root) {
+                    warn('observeCover: poster content not found in modal, skipping observer')
+                } else {
+                    this.coverObserver = new MutationObserver(records => {
+                        for (const record of records) {
+                            if (record.type !== 'attributes' || record.attributeName !== 'src') {
+                                continue
+                            }
+                            const target = record.target
+                            if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
+                                // Сменился src обложки — снимаем заморозку pollCover,
+                                // чтобы он смог пересчитать палитру под новый трек.
+                                // childList/remount без смены src флаг не сбрасывает.
+                                if (this.pollFrozen) {
+                                    log('cover src changed → unfreeze pollCover')
+                                    this.pollFrozen = false
+                                }
+                                log('cover image src changed', target.src)
+                                this.applyCover(target)
+                            }
                         }
-                        const target = record.target
-                        if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
-                            log('cover image src changed', target.src)
-                            this.applyCover(target)
-                        }
-                    }
-                })
+                    })
 
-                this.coverObserver.observe(root, {
-                    subtree: true,
-                    attributes: true,
-                    attributeFilter: ['src', 'srcset'],
-                    childList: true,
-                })
-                log('cover observer started')
+                    this.coverObserver.observe(root, {
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['src', 'srcset'],
+                        childList: true,
+                    })
+                    log('cover observer started')
+                }
             }
         } else {
             warn('observeCover: MutationObserver unavailable, relying on polling only')
@@ -801,6 +930,12 @@ class CanvasBackground {
     }
 
     private pollCover(): void {
+        // После применения новой палитры pollCover «замораживается» до смены обложки.
+        // Иначе каждое срабатывание setInterval/reconcileBackground снова и снова
+        // гоняет обложку через CORS, reapply-ит ту же палитру и грузит процессор.
+        if (this.pollFrozen) {
+            return
+        }
         const img = this.findCover()
         if (!img) {
             log('pollCover: no cover image found')
@@ -849,6 +984,10 @@ class CanvasBackground {
             const dominant = this.darken(rawDominant, BG_LIGHTNESS)
             this.applyPalette(base, dominant)
             this.lastAppliedSrc = src
+            // Замораживаем дальнейшие проверки до смены обложки — следующий
+            // pollCover() будет no-op, пока coverObserver не увидит новый src.
+            this.pollFrozen = true
+            log('pollCover: frozen until cover src changes')
         }
         corsImage.onerror = () => {
             if (requestId !== this.coverRequestId) {
@@ -945,12 +1084,48 @@ function reconcileBackground(): void {
     backgroundInstance.requestPaletteRefresh()
 }
 
+function thisOrDescendantMatches(node: Node, selector: string): boolean {
+    if (!(node instanceof Element)) {
+        return false
+    }
+    if (node.matches(selector)) {
+        return true
+    }
+    return node.querySelector(selector) !== null
+}
+
+function anyAddedNodeMatches(nodes: NodeList, selector: string): boolean {
+    for (const node of Array.from(nodes)) {
+        if (node instanceof Element && node.matches(selector)) {
+            return true
+        }
+    }
+    return false
+}
+
 function watchModal(): void {
     ensureBackground()
 
-    const observer = new MutationObserver(() => {
-        if (retryTimer === null) {
-            reconcileBackground()
+    // Срабатываем только при реальном появлении/исчезновении модалки или обложки.
+    // Любые прочие DOM-мутации плеера (прогресс, тулбары, тексты трека) — игнорируем,
+    // иначе reconcileBackground() будет дёргать requestPaletteRefresh() → pollCover()
+    // на каждый кадр взаимодействия и грузить обложку повторно через CORS.
+    const observer = new MutationObserver(records => {
+        for (const record of records) {
+            if (record.type !== 'childList') {
+                continue
+            }
+            const interesting =
+                thisOrDescendantMatches(record.target, MODAL_SELECTOR) ||
+                thisOrDescendantMatches(record.target, COVER_SELECTOR) ||
+                anyAddedNodeMatches(record.addedNodes, MODAL_SELECTOR) ||
+                anyAddedNodeMatches(record.addedNodes, COVER_SELECTOR)
+            if (interesting) {
+                if (retryTimer === null) {
+                    reconcileBackground()
+                }
+                return
+            }
         }
     })
 

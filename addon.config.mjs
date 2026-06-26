@@ -3,7 +3,7 @@ const addonConfig = {
     directoryName: 'cover2anim',
     name: 'Cover2Anim',
     description: 'Создает красивый задний фон для полноэкранного плеера',
-    version: '0.1.0',
+    version: '0.1.4',
     author: 'karst3nz',
     type: 'script',
     image: 'logo.png',
