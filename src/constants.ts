@@ -17,6 +17,12 @@ const INITIAL_BACKGROUND_COLOR = '#050505'
 // --- Тайминги ---
 // Время (мс) полного бленда палитры blob'ов и фона при смене обложки.
 const PALETTE_FADE_MS = 1800
+// Допустимый диапазон slider'а в UI PulseSync (handleEvents.json → paletteFadeMs: min=0, max=5000).
+const PALETTE_FADE_MS_MIN = 0
+const PALETTE_FADE_MS_MAX = 5000
+// Допустимый диапазон slider'а в UI PulseSync (handleEvents.json → paletteBlendSpeed: min=0.5, max=3).
+const PALETTE_BLEND_SPEED_MIN = 0.5
+const PALETTE_BLEND_SPEED_MAX = 3
 
 // Начальное значение lastDt для первого кадра RAF, пока time ещё не накоплен.
 const INITIAL_FRAME_DELTA_MS = 16
@@ -36,6 +42,8 @@ const FPS_UPDATE_INTERVAL_MS = 500
 // --- Фон: HSL L (0..1) для доминирующего цвета обложки. ---
 // 0 = чёрный, 1 = белый. 0.18 — тёмный фон с различимым оттенком обложки.
 const BG_LIGHTNESS = 0.18
+const BG_LIGHTNESS_MIN = 0
+const BG_LIGHTNESS_MAX = 1
 
 // --- Адаптивность по ширине viewport (px). ---
 const MOBILE_BREAKPOINT_PX = 768
@@ -43,6 +51,9 @@ const MOBILE_BREAKPOINT_PX = 768
 // --- Blob'ы: количество ---
 const BLOB_COUNT_MIN = 36
 const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
+const BLOB_COUNT_MIN_SETTING_MIN = 16
+const BLOB_COUNT_MIN_SETTING_MAX = 96
+
 // Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
 const BLOB_COUNT_DIVISOR_PX = 180
 
@@ -66,6 +77,10 @@ const BLOB_SPEED_DRIFT_MAX = 0.0004
 // Пульсация радиуса: множитель t в sin.
 const BLOB_SPEED_PULSE_MIN = 0.0003
 const BLOB_SPEED_PULSE_MAX = 0.0007
+
+// Скорость блобов
+const BLOB_SPEED_MIN = 0.25
+const BLOB_SPEED_MAX = 4
 
 // --- Blob'ы: волна бленда палитры ---
 // colorOffset распределяет старт бленда по blob'ам: colorOffset = (i / count) * WAVE_SPREAD.
@@ -146,4 +161,14 @@ export {
     PALETTE_WAVE_SPREAD,
     POSTER_CONTENT_SELECTOR,
     RETRY_DELAY_MS,
+    BLOB_COUNT_MIN_SETTING_MAX,
+    BLOB_COUNT_MIN_SETTING_MIN,
+    BG_LIGHTNESS_MAX,
+    BG_LIGHTNESS_MIN,
+    BLOB_SPEED_MAX,
+    BLOB_SPEED_MIN,
+    PALETTE_BLEND_SPEED_MAX,
+    PALETTE_BLEND_SPEED_MIN,
+    PALETTE_FADE_MS_MAX,
+    PALETTE_FADE_MS_MIN,
 }

@@ -4,8 +4,6 @@ import addonConfig from '../addon.config.mjs'
 import { getAddonSettings, readBooleanSetting, readNumberSetting } from './pulsesync'
 import {
     BG_LIGHTNESS,
-    BG_LIGHTNESS_MAX,
-    BG_LIGHTNESS_MIN,
     BLOB_COUNT_DIVISOR_PX,
     BLOB_COUNT_MAX,
     BLOB_COUNT_MIN,
@@ -29,6 +27,8 @@ import {
     BLOB_TEXTURE_SIZE_PX,
     BLUR_DESKTOP_PX,
     BLUR_MOBILE_PX,
+    BG_LIGHTNESS_MAX,
+    BG_LIGHTNESS_MIN,
     CANVAS_ROTATION_RAD_PER_MS,
     CLUSTER_MERGE_RGB_DIST,
     COVER_DEBOUNCE_MS,
@@ -52,15 +52,16 @@ import {
     PALETTE_WAVE_SPREAD,
     POSTER_CONTENT_SELECTOR,
     RETRY_DELAY_MS,
-    SETTING_KEY_BG_LIGHTNESS,
-    SETTING_KEY_BLOB_COUNT_MIN,
-    SETTING_KEY_BLOB_SPEED,
-    SETTING_KEY_ENABLED,
-    SETTING_KEY_PALETTE_BLEND_SPEED,
-    SETTING_KEY_PALETTE_FADE_MS,
-    SETTING_KEY_SHOW_FPS,
 } from './constants'
 
+// Ключи настроек в PulseSync — должны совпадать с `id` в addon/handleEvents.json.
+const SETTING_KEY_ENABLED = 'enabled'
+const SETTING_KEY_SHOW_FPS = 'showFps'
+const SETTING_KEY_PALETTE_FADE_MS = 'paletteFadeMs'
+const SETTING_KEY_PALETTE_BLEND_SPEED = 'paletteBlendSpeed'
+const SETTING_KEY_BLOB_COUNT_MIN = 'blobCountMin'
+const SETTING_KEY_BLOB_SPEED = 'blobSpeed'
+const SETTING_KEY_BG_LIGHTNESS = 'bgLightness'
 
 function log(message: string, ...args: unknown[]): void {
     console.log(`${LOG_PREFIX} ${message}`, ...args)
@@ -421,9 +422,7 @@ class CanvasBackground {
         // (×2 от MIN), чтобы десктопная плотность blob'ов всегда была в 2× от мобильной.
         const minCount = this.settings.blobCountMin
         const maxCount = minCount * 2
-        const count = isMobile
-            ? minCount
-            : Math.max(minCount, Math.min(maxCount, Math.floor(window.innerWidth / BLOB_COUNT_DIVISOR_PX)))
+        const count = isMobile ? minCount : Math.max(minCount, Math.min(maxCount, Math.floor(window.innerWidth / BLOB_COUNT_DIVISOR_PX)))
         const width = this.container.clientWidth || window.innerWidth
         const height = this.container.clientHeight || window.innerHeight
 
@@ -562,17 +561,17 @@ class CanvasBackground {
     }
 
     // Эффективное время бленда = paletteFadeMs / paletteBlendSpeed.
-// paletteFadeMs — полная длительность при скорости 1, paletteBlendSpeed —
-// множитель (>1 быстрее, <1 медленнее). При fade=0 бленд мгновенный (dt/0 = Infinity → colorMix сразу 1).
-private get effectiveFadeMs(): number {
+    // paletteFadeMs — полная длительность при скорости 1, paletteBlendSpeed —
+    // множитель (>1 быстрее, <1 медленнее). При fade=0 бленд мгновенный (dt/0 = Infinity → colorMix сразу 1).
+    private get effectiveFadeMs(): number {
         const fade = this.settings.paletteFadeMs
         if (fade <= 0) {
             return 0.001
         }
         return fade / Math.max(0.01, this.settings.paletteBlendSpeed)
-}
+    }
 
-private updateBlobs(dt: number): void {
+    private updateBlobs(dt: number): void {
         this.animationTime += dt
         const width = this.container.clientWidth || window.innerWidth
         const height = this.container.clientHeight || window.innerHeight
@@ -1228,18 +1227,16 @@ function watchModal(): void {
             enabled: readBooleanSetting(nextSettings, SETTING_KEY_ENABLED, DEFAULT_RUNTIME_SETTINGS.enabled),
             showFps: readBooleanSetting(nextSettings, SETTING_KEY_SHOW_FPS, DEFAULT_RUNTIME_SETTINGS.showFps),
             paletteFadeMs: readNumberSetting(nextSettings, SETTING_KEY_PALETTE_FADE_MS, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
-            paletteBlendSpeed: readNumberSetting(
-                nextSettings,
-                SETTING_KEY_PALETTE_BLEND_SPEED,
-                DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed,
-            ),
+            paletteBlendSpeed: readNumberSetting(nextSettings, SETTING_KEY_PALETTE_BLEND_SPEED, DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed),
             blobCountMin: readNumberSetting(nextSettings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
             blobSpeed: readNumberSetting(nextSettings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
             bgLightness: readNumberSetting(nextSettings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
         }
-        log(`settings changed: enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
-            `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
-            `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}`)
+        log(
+            `settings changed: enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
+                `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
+                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}`,
+        )
         backgroundInstance?.applySettings(runtime)
     })
 
