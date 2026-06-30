@@ -1,5 +1,5 @@
-div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::before,
-div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
+div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode::before,
+div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode::after {
     z-index: -1 !important;
 }
 
@@ -9,19 +9,21 @@ div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode::after {
     left: 0;
     width: 100%;
     height: 100%;
-    z-index: 0;
+    z-index: 2;
     pointer-events: none;
-    background: #000;
     /* filter живёт в --c2a-filter, которую JS задаёт из настроек PulseSync.
        Fallback blur(100px) совпадает с прежним ctx.filter на десктопе,
        чтобы при незагруженном скрипте анимация не выглядела «сырой». */
-    filter: var(--c2a-filter, blur(100px));
+    filter: var(--c2a-filter);
 }
 
-div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode
-    > *:not(.c2a-canvas-bg):not(.c2a-fps) {
+.c2a-bg-div {
+    z-index: 1 !important;
+}
+
+div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode > *:not(.c2a-canvas-bg):not(.c2a-fps) {
     position: relative;
-    z-index: 1;
+    z-index: 2;
 }
 
 .c2a-fps {
@@ -33,7 +35,11 @@ div[data-test-id="FULLSCREEN_PLAYER_MODAL"].canvas-mode
     border-radius: 6px;
     background: rgba(0, 0, 0, 0.45);
     color: rgba(255, 255, 255, 0.85);
-    font: 12px/1 ui-monospace, "SFMono-Regular", "Menlo", monospace;
+    font:
+        12px/1 ui-monospace,
+        'SFMono-Regular',
+        'Menlo',
+        monospace;
     font-variant-numeric: tabular-nums;
     pointer-events: none;
     visibility: visible;

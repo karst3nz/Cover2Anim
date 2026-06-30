@@ -39,11 +39,19 @@ const COVER_DEBOUNCE_MS = 200
 // иначе reflow DOM съест несколько процентов FPS.
 const FPS_UPDATE_INTERVAL_MS = 500
 
-// --- Фон: HSL L (0..1) для доминирующего цвета обложки. ---
-// 0 = чёрный, 1 = белый. 0.18 — тёмный фон с различимым оттенком обложки.
-const BG_LIGHTNESS = 0.18
+// --- Фон: множитель L (HSL) для доминирующего цвета обложки. ---
+// bgDiv сохраняет оттенок и насыщенность топового кластера палитры,
+// а L линейно интерполируется между BG_LIGHTNESS_DARK_FLOOR (для L=0)
+// и BG_LIGHTNESS (для L=1). На практике при дефолте 0.9 фон почти
+// совпадает с доминантой — блобы читаются на фоне обложки, а не на
+// «грязной» подложке.
+const BG_LIGHTNESS = 0.9
 const BG_LIGHTNESS_MIN = 0
 const BG_LIGHTNESS_MAX = 1
+// Минимальный L фона: даже для L=0 в обложке bgDiv остаётся читаемым,
+// а не «уходит» в чёрный. 0.18 — небольшой подъём, чтобы UI плеера
+// не проваливался.
+const BG_LIGHTNESS_DARK_FLOOR = 0.18
 
 // --- Адаптивность по ширине viewport (px). ---
 const MOBILE_BREAKPOINT_PX = 768
@@ -142,6 +150,7 @@ export {
     BLUR_DESKTOP_PX,
     BLUR_MOBILE_PX,
     BG_LIGHTNESS,
+    BG_LIGHTNESS_DARK_FLOOR,
     CANVAS_ROTATION_RAD_PER_MS,
     CLUSTER_MERGE_RGB_DIST,
     COVER_DEBOUNCE_MS,
