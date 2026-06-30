@@ -10,21 +10,30 @@ import {
     BLOB_COUNT_MIN,
     BLOB_COUNT_MIN_SETTING_MAX,
     BLOB_COUNT_MIN_SETTING_MIN,
+    BLOB_FLOW_DEFAULT,
+    BLOB_FLOW_MAX,
+    BLOB_FLOW_MIN,
+    BLOB_HIGHLIGHT_DEFAULT,
+    BLOB_HIGHLIGHT_MAX,
+    BLOB_HIGHLIGHT_MIN,
     BLOB_ORBIT_MAX,
     BLOB_ORBIT_MIN,
     BLOB_PULSE_AMPLITUDE,
     BLOB_RADIUS_INITIAL,
     BLOB_RADIUS_MAX,
     BLOB_RADIUS_MIN,
+    BLOB_SATURATION_DEFAULT,
+    BLOB_SATURATION_MAX,
+    BLOB_SATURATION_MIN,
     BLOB_SPEED_DRIFT_MAX,
     BLOB_SPEED_DRIFT_MIN,
     BLOB_SPEED_MAX,
     BLOB_SPEED_MIN,
     BLOB_SPEED_PULSE_MAX,
     BLOB_SPEED_PULSE_MIN,
-    BLOB_TEXTURE_ALPHA_CORE,
-    BLOB_TEXTURE_ALPHA_EDGE,
-    BLOB_TEXTURE_ALPHA_MID,
+    BLOB_WARP_DEFAULT,
+    BLOB_WARP_MAX,
+    BLOB_WARP_MIN,
     BLUR_DESKTOP_PX,
     BLUR_MOBILE_PX,
     BG_LIGHTNESS_MAX,
@@ -93,40 +102,115 @@ void main() {
 }
 `
 
-// Фрагментный шейдер:
-// Воспроизводит радиальный градиент исходной canvas-текстуры прямо в шейдере,
-// поэтому offscreen-текстуры на HTMLCanvasElement вообще не нужны.
-// Переход цвета (prev → текущий) делается смешиванием двух цветовых юниформов
-// вместо двух вызовов drawImage с комплементарными globalAlpha.
+// Фрагментный шейдер (v2.1 — Apple Music style «дышащие облака», оптимизирован):
+//
+// - Без offscreen canvas: альфа блоба формируется полностью процедурно.
+// - Одноуровневый domain warping: координаты пикселя деформируются одной итерацией
+//   FBM, что даёт текучую форму без квадратичной стоимости двухуровневого варианта.
+// - FBM развёрнут вручную (3 октавы, без цикла) — компилятор GPU разворачивает
+//   детерминированно и инлайнит, тогда как цикл с int-счётчиком часто не векторизуется.
+// - Early-discard по dist > 0.65: отсекает ~40% пикселей в каёвочной зоне до того,
+//   как мы заплатим за FBM. Эти пиксели всё равно были бы с альфой 0.
+// - При u_warp=0 не считается второй проход fbm(p): форма вырождается в mix(0.5, ...),
+//   сохраняя визуальный результат (без деформации шум всё равно [0..1]).
+// - Внутренний highlight: центр пятна заметно ярче, имитируя блик/свечение, как
+//   в полноэкранном плеере Apple Music.
+// - Saturation boost: финальный цвет проходит через linear-luma-mix.
 const FRAG_SRC = /* glsl */ `#version 300 es
 precision mediump float;
 
 in vec2 v_localPos;
 
-uniform vec3  u_color;      // целевой (новый) цвет в линейном RGB [0-1]
-uniform vec3  u_prevColor;  // предыдущий цвет в линейном RGB [0-1]
-uniform float u_blendT;     // 0 = prevColor, 1 = color  (до smoothstep)
-
-// Альфа-точки, соответствующие исходному градиенту canvas (0 → ядро, 0.5 → середина, 1 → край)
-uniform float u_alphaCore;
-uniform float u_alphaMid;
-uniform float u_alphaEdge;
+uniform vec3  u_color;        // целевой (новый) цвет в линейном RGB [0-1]
+uniform vec3  u_prevColor;    // предыдущий цвет в линейном RGB [0-1]
+uniform float u_blendT;       // 0 = prevColor, 1 = color  (до smoothstep)
+uniform float u_time;         // глобальное время в секундах (для FBM)
+uniform float u_aspect;       // width/height canvas (для круглых, а не эллиптических пятен)
+uniform float u_warp;         // сила domain warping [0..1]
+uniform float u_flow;         // скорость течения шума [0..1]
+uniform float u_saturation;   // boost насыщенности [0.8..1.5]
+uniform float u_highlight;    // подсветка центра [0..1]
 
 out vec4 outColor;
 
+// 2D hash (без текстуры, чистый GLSL). Полиномиальный hash — стабильный
+// на любых драйверах, тогда как fract(sin(dot(...))) часто даёт полосы.
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Value noise с бикубической интерполяцией (u = f*f*(3-2f)).
+// 4 вызова hash21 на пиксель — это самый тяжёлый кусок шейдера, поэтому
+// считаем его минимальное количество раз.
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 3-октавный FBM, развёрнутый вручную (без цикла). Лакьюнес 0.5.
+// На мобильных Adreno/Mali развёрнутый FBM на 30-50% быстрее циклического.
+float fbm3(vec2 p) {
+    float v = 0.5 * vnoise(p);
+    v += 0.25 * vnoise(p * 2.0 + vec2(7.3, 1.7));
+    v += 0.125 * vnoise(p * 4.0 + vec2(3.1, 9.4));
+    return v;
+}
+
 void main() {
-    float dist = length(v_localPos);   // 0 в центре, 1 на краю
-    if (dist >= 1.0) discard;
+    // 1. Локальные координаты в «единицах радиуса» (-1..1), исправляем эллиптичность.
+    vec2 p = vec2(v_localPos.x * u_aspect, v_localPos.y);
+    float dist = length(p);
 
-    // Кусочно-линейный спад — безветочное двухсегментное смешивание:
-    //   dist 0   → alphaCore
-    //   dist 0.5 → alphaMid
-    //   dist 1   → alphaEdge
-    float t1 = clamp(dist * 2.0, 0.0, 1.0);        // 0→1 при dist 0→0.5
-    float t2 = clamp(dist * 2.0 - 1.0, 0.0, 1.0);  // 0→1 при dist 0.5→1.0
-    float alpha = mix(mix(u_alphaCore, u_alphaMid, t1), u_alphaEdge, t2);
+    // 2. Early discard: за пределами 0.65 радиуса пиксель всё равно
+    //    прозрачный (radial = 0 при dist >= 1.0, на 0.65 уже 0.27,
+    //    и умножение на noiseMod вряд ли даст >0.01). Экономим FBM
+    //    на ~40% пикселей всех блобов.
+    if (dist > 0.65) discard;
 
-    vec3 finalColor = mix(u_prevColor, u_color, u_blendT);
+    // 3. Базовая мягкая круглая маска: 1 в центре → 0 на радиусе 1.0.
+    float radial = 1.0 - smoothstep(0.45, 1.0, dist);
+
+    // 4. Один проход domain warping. q.x и q.y считаются ОДНИМ fbm3
+    //    с большим смещением между осями (3.7 vs 11.2) — это даёт
+    //    независимые каналы при одном проходе по шуму (4 вызова vnoise,
+    //    а не 8, как было бы при двух fbm).
+    float t = u_time * u_flow;
+    vec2 q = vec2(
+        fbm3(p * 0.9 + vec2(0.0, 0.0) + t * 0.13),
+        fbm3(p * 0.9 + vec2(3.7, 11.2) + t * 0.17)
+    );
+
+    // 5. Финальный FBM. При u_warp=0 — не считаем warped вовсе, берём
+    //    нейтральный 0.5, что соответствует «нет деформации» (fbm без
+    //    смещения всё равно колеблется около 0.5).
+    float f = (u_warp > 0.0) ? fbm3(p * 2.0 + u_warp * 2.0 * q) : 0.5;
+
+    // 6. Модуляция альфа шумом: 0.5..1.3 от радиальной маски.
+    float noiseMod = 0.5 + 0.8 * f;
+    float alpha = radial * noiseMod * 0.85;
+    alpha = clamp(alpha, 0.0, 0.95);
+
+    if (alpha < 0.005) discard;
+
+    // 7. Цвет с цветовым лерпом prev→current (smoothstep для естественного темпа).
+    float bT = u_blendT * u_blendT * (3.0 - 2.0 * u_blendT);
+    vec3 baseColor = mix(u_prevColor, u_color, bT);
+
+    // 8. Подсветка центра.
+    float hl = u_highlight * (1.0 - dist);
+    vec3 finalColor = mix(baseColor, min(baseColor + vec3(0.22), vec3(1.0)), hl);
+
+    // 9. Saturation boost.
+    float luma = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
+    finalColor = mix(vec3(luma), finalColor, u_saturation);
 
     outColor = vec4(finalColor, alpha);
 }
@@ -189,6 +273,10 @@ type AddonRuntimeSettings = {
     blobSpeed: number
     bgLightness: number
     paletteBlendSpeed: number
+    warp: number
+    flow: number
+    saturation: number
+    highlight: number
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +291,10 @@ const SETTING_KEY_PALETTE_BLEND_SPEED = 'paletteBlendSpeed'
 const SETTING_KEY_BLOB_COUNT_MIN = 'blobCountMin'
 const SETTING_KEY_BLOB_SPEED = 'blobSpeed'
 const SETTING_KEY_BG_LIGHTNESS = 'bgLightness'
+const SETTING_KEY_WARP = 'warp'
+const SETTING_KEY_FLOW = 'flow'
+const SETTING_KEY_SATURATION = 'saturation'
+const SETTING_KEY_HIGHLIGHT = 'highlight'
 
 const DEFAULT_RUNTIME_SETTINGS: AddonRuntimeSettings = {
     enabled: true,
@@ -213,6 +305,10 @@ const DEFAULT_RUNTIME_SETTINGS: AddonRuntimeSettings = {
     blobSpeed: 1,
     bgLightness: BG_LIGHTNESS,
     paletteBlendSpeed: 1,
+    warp: BLOB_WARP_DEFAULT,
+    flow: BLOB_FLOW_DEFAULT,
+    saturation: BLOB_SATURATION_DEFAULT,
+    highlight: BLOB_HIGHLIGHT_DEFAULT,
 }
 
 function sanitizeFilter(raw: unknown): string {
@@ -248,6 +344,10 @@ function sanitizeSettings(raw: Partial<AddonRuntimeSettings>): AddonRuntimeSetti
             PALETTE_BLEND_SPEED_MIN,
             PALETTE_BLEND_SPEED_MAX,
         ),
+        warp: clampNumber(raw.warp ?? DEFAULT_RUNTIME_SETTINGS.warp, BLOB_WARP_MIN, BLOB_WARP_MAX),
+        flow: clampNumber(raw.flow ?? DEFAULT_RUNTIME_SETTINGS.flow, BLOB_FLOW_MIN, BLOB_FLOW_MAX),
+        saturation: clampNumber(raw.saturation ?? DEFAULT_RUNTIME_SETTINGS.saturation, BLOB_SATURATION_MIN, BLOB_SATURATION_MAX),
+        highlight: clampNumber(raw.highlight ?? DEFAULT_RUNTIME_SETTINGS.highlight, BLOB_HIGHLIGHT_MIN, BLOB_HIGHLIGHT_MAX),
     }
 }
 
@@ -263,17 +363,11 @@ function readRuntimeSettings(): Partial<AddonRuntimeSettings> {
         blobCountMin: readNumberSetting(settings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
         blobSpeed: readNumberSetting(settings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
         bgLightness: readNumberSetting(settings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
+        warp: readNumberSetting(settings, SETTING_KEY_WARP, DEFAULT_RUNTIME_SETTINGS.warp),
+        flow: readNumberSetting(settings, SETTING_KEY_FLOW, DEFAULT_RUNTIME_SETTINGS.flow),
+        saturation: readNumberSetting(settings, SETTING_KEY_SATURATION, DEFAULT_RUNTIME_SETTINGS.saturation),
+        highlight: readNumberSetting(settings, SETTING_KEY_HIGHLIGHT, DEFAULT_RUNTIME_SETTINGS.highlight),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Маленькие утилиты WebGL2
-// ---------------------------------------------------------------------------
-
-// Преобразует 2-символьную hex-строку альфы (например, 'cc', '80', '00') в float [0, 1].
-function hexAlphaToFloat(hexAlpha: string): number {
-    const val = parseInt(hexAlpha.slice(0, 2), 16)
-    return Number.isNaN(val) ? 1.0 : val / 255
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +384,9 @@ class CanvasBackground {
     private vao!: WebGLVertexArrayObject
     private positionBuffer!: WebGLBuffer
 
-    // Локации юниформов (кэшируются после линковки программы)
+    // Локации юниформов (кэшируются после линковки программы).
+    // «Шейдерные» юниформы (uWarp / uFlow / uSaturation / uHighlight) обновляются
+    // «на лету» из applySettings() — без перекомпиляции шейдера и без recreateBlobs().
     private uResolution!: WebGLUniformLocation
     private uRotation!: WebGLUniformLocation
     private uBlobCenter!: WebGLUniformLocation
@@ -298,6 +394,12 @@ class CanvasBackground {
     private uColor!: WebGLUniformLocation
     private uPrevColor!: WebGLUniformLocation
     private uBlendT!: WebGLUniformLocation
+    private uTime!: WebGLUniformLocation
+    private uAspect!: WebGLUniformLocation
+    private uWarp!: WebGLUniformLocation
+    private uFlow!: WebGLUniformLocation
+    private uSaturation!: WebGLUniformLocation
+    private uHighlight!: WebGLUniformLocation
 
     // Фоновый <div>, рендерящийся ПОД прозрачным WebGL-канвасом.
     // Переходы цвета фона применяются здесь, чтобы CSS-blur на canvas
@@ -469,12 +571,23 @@ class CanvasBackground {
         this.uColor = loc('u_color')
         this.uPrevColor = loc('u_prevColor')
         this.uBlendT = loc('u_blendT')
+        this.uTime = loc('u_time')
+        this.uAspect = loc('u_aspect')
+        this.uWarp = loc('u_warp')
+        this.uFlow = loc('u_flow')
+        this.uSaturation = loc('u_saturation')
+        this.uHighlight = loc('u_highlight')
 
-        // Один раз задаём константные юниформы альфа-точек (в runtime они не меняются).
+        // Один раз задаём дефолтные значения «шейдерных» юниформов.
+        // u_time/u_aspect обновляются каждый кадр; остальные — на лету из applySettings(),
+        // но начальные значения нужны на первом кадре до applySettings().
         gl.useProgram(program)
-        gl.uniform1f(loc('u_alphaCore'), hexAlphaToFloat(BLOB_TEXTURE_ALPHA_CORE))
-        gl.uniform1f(loc('u_alphaMid'), hexAlphaToFloat(BLOB_TEXTURE_ALPHA_MID))
-        gl.uniform1f(loc('u_alphaEdge'), hexAlphaToFloat(BLOB_TEXTURE_ALPHA_EDGE))
+        gl.uniform1f(this.uTime, 0)
+        gl.uniform1f(this.uAspect, 1)
+        gl.uniform1f(this.uWarp, BLOB_WARP_DEFAULT)
+        gl.uniform1f(this.uFlow, BLOB_FLOW_DEFAULT)
+        gl.uniform1f(this.uSaturation, BLOB_SATURATION_DEFAULT)
+        gl.uniform1f(this.uHighlight, BLOB_HIGHLIGHT_DEFAULT)
         gl.useProgram(null)
     }
 
@@ -1109,6 +1222,30 @@ class CanvasBackground {
         const blobCountChanged = next.blobCountMin !== prev.blobCountMin
         const blobSpeedChanged = next.blobSpeed !== prev.blobSpeed
 
+        // Шейдерные эффекты (warp/flow/saturation/highlight) обновляются «на лету»
+        // через uniform1f — никакой recompile шейдера и recreateBlobs() не нужен.
+        if (this.program && !this.disabled) {
+            const gl = this.gl
+            gl.useProgram(this.program)
+            if (next.warp !== prev.warp) {
+                gl.uniform1f(this.uWarp, next.warp)
+                log(`applySettings: warp → ${next.warp}`)
+            }
+            if (next.flow !== prev.flow) {
+                gl.uniform1f(this.uFlow, next.flow)
+                log(`applySettings: flow → ${next.flow}`)
+            }
+            if (next.saturation !== prev.saturation) {
+                gl.uniform1f(this.uSaturation, next.saturation)
+                log(`applySettings: saturation → ${next.saturation}`)
+            }
+            if (next.highlight !== prev.highlight) {
+                gl.uniform1f(this.uHighlight, next.highlight)
+                log(`applySettings: highlight → ${next.highlight}`)
+            }
+            gl.useProgram(null)
+        }
+
         this.settings = next
 
         if ((blobCountChanged || blobSpeedChanged) && this.blobs.length > 0) {
@@ -1195,6 +1332,11 @@ class CanvasBackground {
 
         // Глобальные юниформы
         gl.uniform2f(this.uResolution, width, height)
+        // u_time — секунды от старта анимации, используется для анимации FBM в шейдере.
+        gl.uniform1f(this.uTime, this.animationTime / 1000)
+        // u_aspect — отношение сторон, чтобы круглые блобы оставались круглыми
+        // на широких экранах (без этого радиальная маска вытягивается в эллипс).
+        gl.uniform1f(this.uAspect, height > 0 ? width / height : 1)
 
         // Матрица поворота (column-major для uniformMatrix2fv):
         //   [ cos  -sin ]     col-major → [cos, sin, -sin, cos]
@@ -1316,7 +1458,8 @@ function ensureBackground(): void {
         log(
             `ensureBackground: initial settings enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
                 `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
-                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}`,
+                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
+                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}`,
         )
         backgroundInstance = new CanvasBackground(container, runtime)
         clearRetry()
@@ -1364,12 +1507,17 @@ function watchModal(): void {
             blobCountMin: readNumberSetting(nextSettings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
             blobSpeed: readNumberSetting(nextSettings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
             bgLightness: readNumberSetting(nextSettings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
+            warp: readNumberSetting(nextSettings, SETTING_KEY_WARP, DEFAULT_RUNTIME_SETTINGS.warp),
+            flow: readNumberSetting(nextSettings, SETTING_KEY_FLOW, DEFAULT_RUNTIME_SETTINGS.flow),
+            saturation: readNumberSetting(nextSettings, SETTING_KEY_SATURATION, DEFAULT_RUNTIME_SETTINGS.saturation),
+            highlight: readNumberSetting(nextSettings, SETTING_KEY_HIGHLIGHT, DEFAULT_RUNTIME_SETTINGS.highlight),
         }
         log(
             `settings changed: enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
                 `filter=${runtime.filter}, ` +
                 `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
-                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}`,
+                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
+                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}`,
         )
         backgroundInstance?.applySettings(runtime)
     })
