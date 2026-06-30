@@ -57,10 +57,10 @@ const BG_LIGHTNESS_DARK_FLOOR = 0.18
 const MOBILE_BREAKPOINT_PX = 768
 
 // --- Blob'ы: количество ---
-const BLOB_COUNT_MIN = 36
+const BLOB_COUNT_MIN = 96
 const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
-const BLOB_COUNT_MIN_SETTING_MIN = 16
-const BLOB_COUNT_MIN_SETTING_MAX = 96
+const BLOB_COUNT_MIN_SETTING_MIN = 32
+const BLOB_COUNT_MIN_SETTING_MAX = 128
 
 // Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
 const BLOB_COUNT_DIVISOR_PX = 180
@@ -118,6 +118,11 @@ const BLUR_MOBILE_PX = 70
 // Если у HTMLImageElement ещё нет naturalWidth/Height (не загрузилась) —
 // используем этот размер как fallback для createImageData.
 const COVER_DEFAULT_SIZE_PX = 800
+// Целевой размер обложки при CORS-загрузке: подменяет финальный сегмент
+// `<W>x<H>` в URL (например, `…/400x400` → `…/1000x1000`). CDN Яндекса
+// отдаёт нужный размер по этому сегменту пути. Если сегмента в URL нет,
+// URL используется как есть.
+const COVER_FETCH_SIZE = '1000x1000'
 // Целевое число сэмплов пикселей по всей обложке (для усреднения цвета и палитры).
 const COVER_SAMPLE_TARGET_COUNT = 4000
 // Порог склейки кластеров по RGB: d² < (MERGE_RGB_DIST)². 70 — баланс между
@@ -155,6 +160,7 @@ export {
     CLUSTER_MERGE_RGB_DIST,
     COVER_DEBOUNCE_MS,
     COVER_DEFAULT_SIZE_PX,
+    COVER_FETCH_SIZE,
     COVER_SAMPLE_TARGET_COUNT,
     COVER_SELECTOR,
     EXTRACTED_PALETTE_SIZE,
