@@ -1258,7 +1258,7 @@ class CanvasBackground {
                         for (const record of records) {
                             if (record.type !== 'attributes' || record.attributeName !== 'src') continue
                             const target = record.target
-                            if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
+                          if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
                                 log('cover image src changed', target.src)
                                 this.applyCover(target)
                             }
