@@ -3,6 +3,8 @@
 // (число blob'ов, скорость анимации, размеры текстур, шаги сэмплирования и т.д.)
 // без необходимости лезть в логику CanvasBackground.
 
+import { constants } from 'node:quic'
+
 // --- DOM-селекторы модалки полноэкранного плеера ---
 const MODAL_SELECTOR = 'div[data-test-id="FULLSCREEN_PLAYER_MODAL"]'
 const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT"]'
@@ -63,7 +65,7 @@ const MOBILE_BREAKPOINT_PX = 768
 const BLOB_COUNT_MIN = 40
 const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
 const BLOB_COUNT_MIN_SETTING_MIN = 16
-const BLOB_COUNT_MIN_SETTING_MAX = 80
+const BLOB_COUNT_MIN_SETTING_MAX = 256
 
 // Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
 const BLOB_COUNT_DIVISOR_PX = 240
@@ -158,6 +160,26 @@ const CLUSTER_MERGE_RGB_DIST = 70
 // Сколько цветов берём из кластеров в финальную палитру.
 const EXTRACTED_PALETTE_SIZE = 6
 
+// --- Источник палитры ---
+//   'cover'         — текущее поведение, 6 цветов извлекаются из PNG-обложки.
+//   'derivedColors' — 4 цвета из track.derivedColors (accent, waveText, miniPlayer, average),
+//                     дополняются до 6 повтором первых двух.
+//   'mixed'         — HSL-блендинг: 4 derived-цвета усредняются с 2 топовыми цветами обложки
+//                     в HSL-пространстве (50/50), итого 6 уникальных цветов.
+const PALETTE_SOURCE_COVER = '0' as const
+const PALETTE_SOURCE_DERIVED = '1' as const
+const PALETTE_SOURCE_MIXED = '2' as const
+
+const PALETTE_SOURCE_VALUES = [PALETTE_SOURCE_COVER, PALETTE_SOURCE_DERIVED, PALETTE_SOURCE_MIXED] as const
+
+type PaletteSource = (typeof PALETTE_SOURCE_VALUES)[number]
+const PALETTE_SOURCE_DEFAULT: PaletteSource = PALETTE_SOURCE_COVER
+
+// URL локального сервера, отдающего JSON текущего трека Яндекс Музыки (fallback для pulsesyncApi).
+const JSON_POLLER_URL = 'http://127.0.0.1:2007/get_track'
+// Период опроса JSON-эндпоинта. 2.5 с — баланс между свежестью и нагрузкой.
+const JSON_POLLER_INTERVAL_MS = 2500
+
 // --- Логирование ---
 const LOG_PREFIX = '[Cover2Anim]'
 
@@ -222,4 +244,11 @@ export {
     BLOB_HIGHLIGHT_DEFAULT,
     BLOB_HIGHLIGHT_MIN,
     BLOB_HIGHLIGHT_MAX,
+    JSON_POLLER_INTERVAL_MS,
+    JSON_POLLER_URL,
+    PALETTE_SOURCE_COVER,
+    PALETTE_SOURCE_DEFAULT,
+    PALETTE_SOURCE_DERIVED,
+    PALETTE_SOURCE_MIXED,
+    PALETTE_SOURCE_VALUES,
 }

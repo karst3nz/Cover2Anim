@@ -1,7 +1,7 @@
 import './styles.css'
 
 import addonConfig from '../addon.config.mjs'
-import { getAddonSettings, readBooleanSetting, readNumberSetting, readStringSetting } from './pulsesync'
+import { getAddonSettings, readBooleanSetting, readNumberSetting, readStringSetting, readSelectSetting } from './pulsesync'
 import {
     BG_LIGHTNESS,
     BG_LIGHTNESS_DARK_FLOOR,
@@ -49,6 +49,8 @@ import {
     FPS_UPDATE_INTERVAL_MS,
     INITIAL_BACKGROUND_COLOR,
     INITIAL_FRAME_DELTA_MS,
+    JSON_POLLER_INTERVAL_MS,
+    JSON_POLLER_URL,
     LOG_PREFIX,
     MAX_RETRIES,
     MODAL_SELECTOR,
@@ -58,6 +60,11 @@ import {
     PALETTE_FADE_MS,
     PALETTE_FADE_MS_MAX,
     PALETTE_FADE_MS_MIN,
+    PALETTE_SOURCE_COVER,
+    PALETTE_SOURCE_DEFAULT,
+    PALETTE_SOURCE_DERIVED,
+    PALETTE_SOURCE_MIXED,
+    PALETTE_SOURCE_VALUES,
     PALETTE_WAVE_SPREAD,
     POSTER_CONTENT_SELECTOR,
     RETRY_DELAY_MS,
@@ -221,19 +228,25 @@ void main() {
 // ---------------------------------------------------------------------------
 
 function log(message: string, ...args: unknown[]): void {
-    console.log(`${LOG_PREFIX} ${message}`, ...args)
+    if (getAddonSettings(addonConfig.name).getCurrent().enableLogging.value === true) {
+        console.log(`${LOG_PREFIX} ${message}`, ...args)
+    }
 }
 
-function warn(message: string, ...args: unknown[]): void {
-    console.warn(`${LOG_PREFIX} ${message}`, ...args)
+function debug(message: string, ...args: unknown[]): void {
+    if (getAddonSettings(addonConfig.name).getCurrent().enableLogging.value === true) {
+        console.debug(`${LOG_PREFIX} ${message}`, ...args)
+    }
 }
 
 function error(message: string, ...args: unknown[]): void {
-    console.error(`${LOG_PREFIX} ${message}`, ...args)
-    for (const arg of args) {
-        if (arg instanceof Error) {
-            if (arg.message) console.error(`${LOG_PREFIX}   message:`, arg.message)
-            if (arg.stack) console.error(`${LOG_PREFIX}   stack:`, arg.stack)
+    if (getAddonSettings(addonConfig.name).getCurrent().enableLogging.value === true) {
+        console.error(`${LOG_PREFIX} ${message}`, ...args)
+        for (const arg of args) {
+            if (arg instanceof Error) {
+                if (arg.message) console.error(`${LOG_PREFIX}   message:`, arg.message)
+                if (arg.stack) console.error(`${LOG_PREFIX}   stack:`, arg.stack)
+            }
         }
     }
 }
@@ -264,9 +277,12 @@ type Blob = {
 }
 
 // Все настройки, читаемые из PulseSync, + выводимые runtime-параметры.
+type PaletteSource = '0' | '1' | '2' // 0 - cover 1 - derivedColors 2 - mixed
+
 type AddonRuntimeSettings = {
     enabled: boolean
     showFps: boolean
+    enableLogging: boolean
     filter: string
     paletteFadeMs: number
     blobCountMin: number
@@ -277,6 +293,7 @@ type AddonRuntimeSettings = {
     flow: number
     saturation: number
     highlight: number
+    paletteSource: PaletteSource
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +301,9 @@ type AddonRuntimeSettings = {
 // ---------------------------------------------------------------------------
 
 const SETTING_KEY_ENABLED = 'enabled'
+const SETTING_KEY_PALETTE_SOURCE = 'paletteSource'
 const SETTING_KEY_SHOW_FPS = 'showFps'
+const SETTING_KEY_ENABLE_LOGGING = 'enableLogging'
 const SETTING_KEY_FILTER = 'filter'
 const SETTING_KEY_PALETTE_FADE_MS = 'paletteFadeMs'
 const SETTING_KEY_PALETTE_BLEND_SPEED = 'paletteBlendSpeed'
@@ -299,6 +318,7 @@ const SETTING_KEY_HIGHLIGHT = 'highlight'
 const DEFAULT_RUNTIME_SETTINGS: AddonRuntimeSettings = {
     enabled: true,
     showFps: false,
+    enableLogging: false,
     filter: '',
     paletteFadeMs: PALETTE_FADE_MS,
     blobCountMin: BLOB_COUNT_MIN,
@@ -309,17 +329,28 @@ const DEFAULT_RUNTIME_SETTINGS: AddonRuntimeSettings = {
     flow: BLOB_FLOW_DEFAULT,
     saturation: BLOB_SATURATION_DEFAULT,
     highlight: BLOB_HIGHLIGHT_DEFAULT,
+    paletteSource: PALETTE_SOURCE_DEFAULT,
 }
 
 function sanitizeFilter(raw: unknown): string {
     const value = typeof raw === 'string' ? raw.trim() : ''
-    if (!value || value.toLowerCase() === 'none') return 'none'
+    if (!value || value.toLowerCase() === 'none') {
+        log('sanitizeFilter: значение пустое или "none" → используем "blur(100px)"')
+        return 'blur(100px)'
+    }
     const FUNCTIONS = ['blur', 'saturate', 'contrast', 'brightness', 'hue-rotate', 'invert', 'grayscale', 'sepia', 'drop-shadow']
     const allowed = new RegExp(`^([a-z-]+\\([^()]*\\)\\s*)+$`, 'i')
-    if (!allowed.test(value)) return DEFAULT_RUNTIME_SETTINGS.filter
-    for (const fn of FUNCTIONS) {
-        if (new RegExp(`\\b${fn}\\s*\\(`, 'i').test(value)) return value
+    if (!allowed.test(value)) {
+        log(`sanitizeFilter: значение "${value}" не прошло проверку синтаксиса CSS-фильтра, откат к дефолту "${DEFAULT_RUNTIME_SETTINGS.filter}"`)
+        return DEFAULT_RUNTIME_SETTINGS.filter
     }
+    for (const fn of FUNCTIONS) {
+        if (new RegExp(`\\b${fn}\\s*\\(`, 'i').test(value)) {
+            log(`sanitizeFilter: значение "${value}" принято (найдена разрешённая функция "${fn}")`)
+            return value
+        }
+    }
+    log(`sanitizeFilter: значение "${value}" не содержит ни одной разрешённой функции фильтра, откат к дефолту`)
     return DEFAULT_RUNTIME_SETTINGS.filter
 }
 
@@ -329,9 +360,11 @@ function clampNumber(value: number, min: number, max: number): number {
 }
 
 function sanitizeSettings(raw: Partial<AddonRuntimeSettings>): AddonRuntimeSettings {
-    return {
+    log('sanitizeSettings: получены сырые настройки для валидации', raw)
+    const result: AddonRuntimeSettings = {
         enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_RUNTIME_SETTINGS.enabled,
         showFps: typeof raw.showFps === 'boolean' ? raw.showFps : DEFAULT_RUNTIME_SETTINGS.showFps,
+        enableLogging: typeof raw.enableLogging === 'boolean' ? raw.enableLogging : DEFAULT_RUNTIME_SETTINGS.enableLogging,
         filter: sanitizeFilter(raw.filter ?? DEFAULT_RUNTIME_SETTINGS.filter),
         paletteFadeMs: clampNumber(raw.paletteFadeMs ?? DEFAULT_RUNTIME_SETTINGS.paletteFadeMs, PALETTE_FADE_MS_MIN, PALETTE_FADE_MS_MAX),
         blobCountMin: Math.round(
@@ -348,15 +381,29 @@ function sanitizeSettings(raw: Partial<AddonRuntimeSettings>): AddonRuntimeSetti
         flow: clampNumber(raw.flow ?? DEFAULT_RUNTIME_SETTINGS.flow, BLOB_FLOW_MIN, BLOB_FLOW_MAX),
         saturation: clampNumber(raw.saturation ?? DEFAULT_RUNTIME_SETTINGS.saturation, BLOB_SATURATION_MIN, BLOB_SATURATION_MAX),
         highlight: clampNumber(raw.highlight ?? DEFAULT_RUNTIME_SETTINGS.highlight, BLOB_HIGHLIGHT_MIN, BLOB_HIGHLIGHT_MAX),
+        paletteSource: (() => {
+            const n = Number(raw.paletteSource)
+
+            if (Number.isInteger(n) && n >= 0 && n < PALETTE_SOURCE_VALUES.length) {
+                return n as PaletteSource
+            }
+
+            return DEFAULT_RUNTIME_SETTINGS.paletteSource
+        })(),
     }
+    log('sanitizeSettings: итоговые провалидированные настройки', result)
+    return result
 }
 
 function readRuntimeSettings(): Partial<AddonRuntimeSettings> {
+    log('readRuntimeSettings: читаю текущие настройки аддона из хранилища PulseSync')
     const settingsStore = getAddonSettings(addonConfig.name)
     const settings = settingsStore.getCurrent()
+    log('readRuntimeSettings: сырые данные из хранилища получены', settings)
     return {
         enabled: readBooleanSetting(settings, SETTING_KEY_ENABLED, DEFAULT_RUNTIME_SETTINGS.enabled),
         showFps: readBooleanSetting(settings, SETTING_KEY_SHOW_FPS, DEFAULT_RUNTIME_SETTINGS.showFps),
+        enableLogging: readBooleanSetting(settings, SETTING_KEY_ENABLE_LOGGING, DEFAULT_RUNTIME_SETTINGS.enableLogging),
         filter: readStringSetting(settings, SETTING_KEY_FILTER, DEFAULT_RUNTIME_SETTINGS.filter),
         paletteFadeMs: readNumberSetting(settings, SETTING_KEY_PALETTE_FADE_MS, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
         paletteBlendSpeed: readNumberSetting(settings, SETTING_KEY_PALETTE_BLEND_SPEED, DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed),
@@ -367,7 +414,305 @@ function readRuntimeSettings(): Partial<AddonRuntimeSettings> {
         flow: readNumberSetting(settings, SETTING_KEY_FLOW, DEFAULT_RUNTIME_SETTINGS.flow),
         saturation: readNumberSetting(settings, SETTING_KEY_SATURATION, DEFAULT_RUNTIME_SETTINGS.saturation),
         highlight: readNumberSetting(settings, SETTING_KEY_HIGHLIGHT, DEFAULT_RUNTIME_SETTINGS.highlight),
+        paletteSource: readSelectSetting(settings, SETTING_KEY_PALETTE_SOURCE, DEFAULT_RUNTIME_SETTINGS.paletteSource, PALETTE_SOURCE_VALUES),
     }
+}
+
+// ---------------------------------------------------------------------------
+// TrackJsonPoller — опрашивает локальный JSON-эндпоинт с состоянием плеера
+// и уведомляет о смене трека. Палитра применяется ТОЛЬКО при смене track.id,
+// чтобы не дёргать бленд блобов каждые 2.5 с.
+// ---------------------------------------------------------------------------
+
+// Минимальный набор полей из ответа 127.0.0.1:2007/get_track.
+type JsonTrackDerivedColors = {
+    accent?: unknown
+    waveText?: unknown
+    miniPlayer?: unknown
+    average?: unknown
+}
+type JsonTrack = {
+    id?: unknown
+    derivedColors?: JsonTrackDerivedColors
+}
+type JsonTrackResponse = {
+    track?: JsonTrack
+}
+
+type TrackUpdate = {
+    id: string
+    colors: [string, string, string, string] // accent, waveText, miniPlayer, average
+}
+
+class TrackJsonPoller {
+    private readonly url: string
+    private readonly intervalMs: number
+    private readonly onUpdate: (update: TrackUpdate) => void
+    private readonly onError: (err: unknown) => void
+
+    private timerId: number | null = null
+    private controller: AbortController | null = null
+    private inFlight = false
+
+    constructor(url: string, intervalMs: number, onUpdate: (u: TrackUpdate) => void, onError: (e: unknown) => void) {
+        this.url = url
+        this.intervalMs = intervalMs
+        this.onUpdate = onUpdate
+        this.onError = onError
+    }
+
+    start(): void {
+        if (this.timerId !== null) {
+            log(`TrackJsonPoller.start: поллер уже запущен (url=${this.url}), повторный запуск проигнорирован`)
+            return
+        }
+        log(`TrackJsonPoller.start: запуск опроса ${this.url} с интервалом ${this.intervalMs}мс`)
+        // Сразу дёргаем один раз — не ждём первый tick, иначе первый кадр пустой.
+        void this.tick()
+        this.timerId = window.setInterval(() => void this.tick(), this.intervalMs)
+    }
+
+    stop(): void {
+        if (this.timerId !== null) {
+            window.clearInterval(this.timerId)
+            this.timerId = null
+            log('TrackJsonPoller.stop: интервал опроса остановлен')
+        } else {
+            log('TrackJsonPoller.stop: интервал уже был остановлен ранее')
+        }
+        if (this.controller) {
+            log('TrackJsonPoller.stop: прерываю активный fetch-запрос (AbortController.abort)')
+        }
+        this.controller?.abort()
+        this.controller = null
+        this.inFlight = false
+    }
+
+    private async tick(): Promise<void> {
+        if (this.inFlight) {
+            log('TrackJsonPoller.tick: предыдущий запрос ещё выполняется, пропускаю тик')
+            return
+        }
+        this.inFlight = true
+        this.controller = new AbortController()
+        const startedAt = performance.now()
+        log(`TrackJsonPoller.tick: отправляю запрос → ${this.url}`)
+        try {
+            const res = await fetch(this.url, { signal: this.controller.signal, cache: 'no-store' })
+            const elapsed = (performance.now() - startedAt).toFixed(1)
+            if (!res.ok) {
+                log(`TrackJsonPoller.tick: сервер вернул ошибку HTTP ${res.status} (за ${elapsed}мс)`)
+                this.onError(new Error(`HTTP ${res.status}`))
+                return
+            }
+            log(`TrackJsonPoller.tick: ответ получен за ${elapsed}мс, статус ${res.status}, разбираю JSON`)
+            const data = (await res.json()) as JsonTrackResponse
+            const update = parseTrackUpdate(data)
+            if (update) {
+                log(`TrackJsonPoller.tick: получено валидное обновление трека id="${update.id}", цвета:`, update.colors)
+                this.onUpdate(update)
+            } else {
+                log('TrackJsonPoller.tick: ответ не содержит валидных данных трека (нет id или derivedColors), игнорирую')
+            }
+        } catch (err) {
+            // AbortError при stop() — не считаем ошибкой.
+            if (err instanceof DOMException && err.name === 'AbortError') {
+                log('TrackJsonPoller.tick: запрос был прерван (AbortError), это ожидаемо при остановке поллера')
+                return
+            }
+            log('TrackJsonPoller.tick: ошибка при выполнении запроса или разборе JSON', err)
+            this.onError(err)
+        } finally {
+            this.inFlight = false
+        }
+    }
+}
+
+// Валидирует hex-цвет из track.derivedColors.
+// Принимает '#RGB' / '#RRGGBB' (регистр любой). Возвращает нормализованный '#rrggbb' либо null.
+function normalizeHexColor(raw: unknown): string | null {
+    if (typeof raw !== 'string') {
+        log(`normalizeHexColor: ожидалась строка, получено значение типа "${typeof raw}"`, raw)
+        return null
+    }
+    const value = raw.trim()
+    if (!value.startsWith('#')) {
+        log(`normalizeHexColor: строка "${value}" не начинается с "#"`)
+        return null
+    }
+    const hex = value.slice(1)
+    if (hex.length === 3) {
+        const expanded = hex
+            .split('')
+            .map(ch => ch + ch)
+            .join('')
+        if (!/^[0-9a-fA-F]{6}$/.test(expanded)) {
+            log(`normalizeHexColor: короткий hex "${value}" содержит недопустимые символы`)
+            return null
+        }
+        return `#${expanded.toLowerCase()}`
+    }
+    if (hex.length === 6) {
+        if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
+            log(`normalizeHexColor: hex "${value}" содержит недопустимые символы`)
+            return null
+        }
+        return `#${hex.toLowerCase()}`
+    }
+    log(`normalizeHexColor: неподдерживаемая длина hex-строки "${value}" (${hex.length} символов, ожидалось 3 или 6)`)
+    return null
+}
+
+// Извлекает из JSON { track: { id, derivedColors: { accent, waveText, miniPlayer, average } } }
+// валидный update. Если id или любой из 4 цветов отсутствует/невалиден — возвращает null.
+function parseTrackUpdate(data: unknown): TrackUpdate | null {
+    if (!data || typeof data !== 'object') {
+        log('parseTrackUpdate: корневой объект ответа отсутствует или не является объектом', data)
+        return null
+    }
+    const root = data as JsonTrackResponse
+    const track = root.track
+    if (!track || typeof track !== 'object') {
+        log('parseTrackUpdate: поле "track" отсутствует или не является объектом')
+        return null
+    }
+
+    const id = track.id
+    if (typeof id !== 'string' || id.length === 0) {
+        log('parseTrackUpdate: поле "track.id" отсутствует, не строка или пустое', id)
+        return null
+    }
+
+    const dc = track.derivedColors
+    if (!dc || typeof dc !== 'object') {
+        log(`parseTrackUpdate: track.id="${id}" — поле "derivedColors" отсутствует или не является объектом`)
+        return null
+    }
+
+    const accent = normalizeHexColor(dc.accent)
+    const waveText = normalizeHexColor(dc.waveText)
+    const miniPlayer = normalizeHexColor(dc.miniPlayer)
+    const average = normalizeHexColor(dc.average)
+
+    if (!accent || !waveText || !miniPlayer || !average) {
+        log(`parseTrackUpdate: track.id="${id}" — один или несколько цветов невалидны`, {
+            accent,
+            waveText,
+            miniPlayer,
+            average,
+        })
+        return null
+    }
+
+    log(
+        `parseTrackUpdate: track.id="${id}" успешно разобран, цвета: accent=${accent} waveText=${waveText} miniPlayer=${miniPlayer} average=${average}`,
+    )
+    return { id, colors: [accent, waveText, miniPlayer, average] }
+}
+
+// Дополняет 4-цветную палитру от derivedColors до EXTRACTED_PALETTE_SIZE=6,
+// повторяя первые два цвета. Так палитра блобов «дышит» равномерно и попадает
+// в 6-цветный контракт extractColors().
+function expandDerivedPalette(colors: readonly [string, string, string, string]): string[] {
+    const expanded = [colors[0], colors[1], colors[2], colors[3], colors[0], colors[1]]
+    log('expandDerivedPalette: 4-цветная палитра расширена до 6 цветов', { исходная: colors, результат: expanded })
+    return expanded
+}
+
+// HSL-блендинг двух hex-цветов 50/50. Используется для mixed-режима, где
+// derived-цвета усредняются с топовыми цветами обложки в HSL-пространстве.
+function blendHslHalf(hexA: string, hexB: string): string {
+    const a = hexToHsl(hexA)
+    const b = hexToHsl(hexB)
+    // Hue идёт по короткой дуге (если разница > 180° — берём +360 для a, чтобы не ходить через 0).
+    let h = a.h
+    const diff = b.h - a.h
+    if (diff > 180) h += 360
+    else if (diff < -180) h -= 360
+    const mixedH = (h + b.h) / 2
+    const normalizedH = ((mixedH % 360) + 360) % 360
+    const mixedS = (a.s + b.s) / 2
+    const mixedL = (a.l + b.l) / 2
+    return hslToHex(normalizedH, mixedS, mixedL)
+}
+
+// Смешивает 4-цветную derived-палитру с 2 топовыми цветами обложки попарно
+// (HSL-блендинг 50/50) и дополняет до 6 уникальных цветов повтором первых двух.
+// Если topColors пуст (обложка ещё не пришла в mixed-режиме) — fallback на
+// expandDerivedPalette.
+function mixDerivedWithCover(derived: readonly [string, string, string, string], topColors: readonly string[]): string[] {
+    if (topColors.length < 2) {
+        log('mixDerivedWithCover: топовые цвета обложки отсутствуют, fallback на expandDerivedPalette')
+        return expandDerivedPalette(derived)
+    }
+    const [t0, t1] = topColors
+    const mixed: string[] = [blendHslHalf(derived[0], t0), blendHslHalf(derived[1], t1), blendHslHalf(derived[2], t0), blendHslHalf(derived[3], t1)]
+    const expanded = [mixed[0], mixed[1], mixed[2], mixed[3], mixed[0], mixed[1]]
+    log('mixDerivedWithCover: 4 derived × 2 cover → 6 mixed (HSL 50/50)', { derived, top: topColors, mixed: expanded })
+    return expanded
+}
+
+// Локальные HSL-хелперы (изолированы от this.rgbToHsl, чтобы их можно было
+// использовать на уровне модуля).
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
+    const value = hex.startsWith('#') ? hex.slice(1) : hex
+    if (value.length !== 6) return { h: 0, s: 0, l: 0 }
+    const r = parseInt(value.slice(0, 2), 16) / 255
+    const g = parseInt(value.slice(2, 4), 16) / 255
+    const b = parseInt(value.slice(4, 6), 16) / 255
+    const max = Math.max(r, g, b)
+    const min = Math.min(r, g, b)
+    const l = (max + min) / 2
+    let h = 0
+    let s = 0
+    if (max !== min) {
+        const d = max - min
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+        if (max === r) h = (g - b) / d + (g < b ? 6 : 0)
+        else if (max === g) h = (b - r) / d + 2
+        else h = (r - g) / d + 4
+        h *= 60
+    }
+    return { h, s, l }
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+    const c = (1 - Math.abs(2 * l - 1)) * s
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+    const m = l - c / 2
+    let r1 = 0
+    let g1 = 0
+    let b1 = 0
+    if (h < 60) {
+        r1 = c
+        g1 = x
+        b1 = 0
+    } else if (h < 120) {
+        r1 = x
+        g1 = c
+        b1 = 0
+    } else if (h < 180) {
+        r1 = 0
+        g1 = c
+        b1 = x
+    } else if (h < 240) {
+        r1 = 0
+        g1 = x
+        b1 = c
+    } else if (h < 300) {
+        r1 = x
+        g1 = 0
+        b1 = c
+    } else {
+        r1 = c
+        g1 = 0
+        b1 = x
+    }
+    const toHex = (v: number): string => {
+        const n = Math.round((v + m) * 255)
+        return n.toString(16).padStart(2, '0')
+    }
+    return `#${toHex(r1)}${toHex(g1)}${toHex(b1)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +761,9 @@ class CanvasBackground {
 
     private settings: AddonRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS }
     private basePalette: string[] = []
+    // Топ-2 цвета обложки (по убыванию веса кластера). Нужны для mixed-режима,
+    // где 4 derived-цвета HSL-блендятся с 2 топовыми цветами обложки.
+    private coverTopPalette: string[] = []
     private disabled = false
 
     private fpsElement: HTMLDivElement | null = null
@@ -430,6 +778,13 @@ class CanvasBackground {
     private lastAppliedSrc: string | null = null
     private coverDebounceTimer: number | null = null
     private pendingCoverSrc: string | null = null
+
+    // Источник палитры: 'cover' (обложка) / 'derivedColors' (JSON 127.0.0.1:2007).
+    // Если usingJsonPalette=true — applyCover/loadCover игнорируются,
+    // поллер применяет палитру от derivedColors при смене track.id.
+    private usingJsonPalette = false
+    private jsonPoller: TrackJsonPoller | null = null
+    private lastJsonTrackId: string | null = null
 
     constructor(container: HTMLElement, initialSettings?: Partial<AddonRuntimeSettings>) {
         this.container = container
@@ -447,7 +802,6 @@ class CanvasBackground {
         // --- WebGL2 canvas ---
         this.canvas = document.createElement('canvas')
         this.canvas.className = 'c2a-canvas-bg'
-
         // alpha:true → прозрачный очищающий цвет, чтобы фон bgDiv просвечивал;
         // premultipliedAlpha:false → straight alpha — проще математика смешивания.
         const gl = this.canvas.getContext('webgl2', {
@@ -499,9 +853,7 @@ class CanvasBackground {
         const initialDominant = this.dominantBgFromPalette(FALLBACK_PALETTE, this.settings.bgLightness)
         this.applyPalette(FALLBACK_PALETTE, initialDominant)
 
-        const initial = this.findCover()
-        if (initial) this.applyCover(initial)
-        this.observeCover()
+        this.applyPaletteFromSource()
 
         log('background attached to', container)
     }
@@ -561,7 +913,7 @@ class CanvasBackground {
         // --- Кэшируем локации юниформов ---
         const loc = (name: string): WebGLUniformLocation => {
             const l = gl.getUniformLocation(program, name)
-            if (!l) warn(`initGL: юниформ "${name}" не найден — возможно, шейдер его оптимизировал`)
+            if (!l) log(`initGL: юниформ "${name}" не найден — возможно, шейдер его оптимизировал`)
             return l!
         }
         this.uResolution = loc('u_resolution')
@@ -617,7 +969,7 @@ class CanvasBackground {
             this.coverDebounceTimer = null
             log('cover debounce timer stopped')
         }
-
+        this.jsonPoller?.stop()
         this.resizeObserver?.disconnect()
         this.coverObserver?.disconnect()
         window.removeEventListener('resize', this.onWindowResize)
@@ -651,8 +1003,96 @@ class CanvasBackground {
     }
 
     requestPaletteRefresh(): void {
-        const current = this.findCover()
-        if (current) this.applyCover(current)
+        this.applyPaletteFromSource()
+    }
+
+    // Запускает нужный режим получения палитры в зависимости от settings.paletteSource.
+    // Вызывается из конструктора и из applySettings при смене источника.
+    //   - cover:      подгрузить обложку + запустить observer src.
+    //   - derivedColors: запустить JSON-поллер, observer обложки не нужен.
+    //   - mixed:      запустить поллер + подгрузить обложку + observer (нужен для coverTopPalette).
+    private applyPaletteFromSource(): void {
+        const source = String(this.settings.paletteSource)
+        log(`applyPaletteFromSource: текущий источник палитры = "${source}"`)
+
+        // По умолчанию отключаем поллер — он будет включён только для не-cover режимов.
+        this.jsonPoller?.stop()
+        this.jsonPoller = null
+        this.lastJsonTrackId = null
+
+        // Отключаем предыдущий observer обложки (если был из другого режима) и
+        // инвалидируем debounce/in-flight загрузку обложки, чтобы устаревший
+        // результат не перезаписал палитру нового режима после переключения.
+        this.coverObserver?.disconnect()
+        this.coverObserver = null
+        if (this.coverDebounceTimer !== null) {
+            window.clearTimeout(this.coverDebounceTimer)
+            this.coverDebounceTimer = null
+        }
+        this.pendingCoverSrc = null
+        this.coverRequestId += 1
+
+        // derivedColors — единственный режим, где обложка не участвует в палитре вовсе,
+        // поэтому applyCover/loadCover должны полностью игнорироваться (guard в applyCover).
+        this.usingJsonPalette = source === PALETTE_SOURCE_DERIVED
+        if (source === PALETTE_SOURCE_DERIVED) {
+            this.startJsonPoller()
+            log('applyPaletteFromSource: режим "derivedColors" — observer обложки не активен')
+            return
+        }
+
+        if (source === PALETTE_SOURCE_MIXED) {
+            this.startJsonPoller()
+            // mixed-режим нуждается в coverTopPalette — обложка подгружается параллельно.
+            const initial = this.findCover()
+            if (initial) this.applyCover(initial, true)
+            this.observeCover()
+            log('applyPaletteFromSource: режим "mixed" — поллер + observer обложки активны')
+            return
+        }
+
+        // source === PALETTE_SOURCE_COVER (или дефолт)
+        const initial = this.findCover()
+        if (initial) this.applyCover(initial, true)
+        this.observeCover()
+        log('applyPaletteFromSource: режим "cover" — observer обложки активен')
+    }
+
+    // Создаёт и стартует TrackJsonPoller с колбэком applyTrackUpdate.
+    private startJsonPoller(): void {
+        if (this.jsonPoller) {
+            log('startJsonPoller: поллер уже существует, повторный запуск игнорирован')
+            return
+        }
+        this.jsonPoller = new TrackJsonPoller(
+            JSON_POLLER_URL,
+            JSON_POLLER_INTERVAL_MS,
+            update => this.applyTrackUpdate(update),
+            err => log('TrackJsonPoller.onError:', err),
+        )
+        this.jsonPoller.start()
+    }
+
+    // Колбэк поллера: обновление трека → применяем derived-палитру.
+    // В mixed-режиме — HSL-блендинг с топовыми цветами обложки.
+    private applyTrackUpdate(update: TrackUpdate): void {
+        const source = String(this.settings.paletteSource)
+        if (source !== PALETTE_SOURCE_DERIVED && source !== PALETTE_SOURCE_MIXED) {
+            log('applyTrackUpdate: источник палитры не derived/mixed, обновление игнорируется')
+            return
+        }
+        if (update.id === this.lastJsonTrackId) {
+            log(`applyTrackUpdate: track.id="${update.id}" не изменился, пропуск`)
+            return
+        }
+        this.lastJsonTrackId = update.id
+        log(`applyTrackUpdate: новый track.id="${update.id}", применяем палитру (source=${source})`)
+
+        const palette =
+            source === PALETTE_SOURCE_MIXED ? mixDerivedWithCover(update.colors, this.coverTopPalette) : expandDerivedPalette(update.colors)
+        const dominant = this.dominantBgFromPalette(palette, this.settings.bgLightness)
+        this.basePalette = palette
+        this.applyPalette(palette, dominant)
     }
 
     // -------------------------------------------------------------------------
@@ -996,7 +1436,7 @@ class CanvasBackground {
         const c = document.createElement('canvas')
         const x = c.getContext('2d')
         if (!x) {
-            warn('extractColors: 2d context unavailable, using fallback palette')
+            log('extractColors: 2d context unavailable, using fallback palette')
             return FALLBACK_PALETTE
         }
         try {
@@ -1056,7 +1496,7 @@ class CanvasBackground {
             log('extracted colors from cover', colors)
             return colors
         } catch (err) {
-            warn('extractColors: failed to read pixels (likely cross-origin), using fallback palette', err)
+            log('extractColors: failed to read pixels (likely cross-origin), using fallback palette', err)
             return FALLBACK_PALETTE
         }
     }
@@ -1090,13 +1530,28 @@ class CanvasBackground {
     // Загрузка обложки
     // -------------------------------------------------------------------------
 
-    private applyCover(img: HTMLImageElement): void {
+    private applyCover(img: HTMLImageElement, force: boolean = false): void {
         const src = this.pickCoverUrl(img)
-        if (!src) {
-            warn('applyCover: cover image has no src, skipping')
-            return
+        if (force === false) {
+            if (this.usingJsonPalette) {
+                log('applyCover: источник палитры = "derivedColors", изменение обложки игнорируется')
+                return
+            }
+            const src = this.pickCoverUrl(img)
+            if (!src) {
+                log('applyCover: cover image has no src, skipping')
+                return
+            }
+            if (src === this.pendingCoverSrc) {
+                log(`applyCover: src=${src} уже в очереди на дебаунс, повтор игнорируется`)
+                return
+            }
+            if (src === this.lastAppliedSrc) {
+                log(`applyCover: src=${src} совпадает с уже применённым, пропуск`)
+                return
+            }
         }
-        if (src === this.pendingCoverSrc || src === this.lastAppliedSrc) return
+        log(`applyCover: получен новый запрос (src=${src}, force=${force}), запускаем дебаунс на ${COVER_DEBOUNCE_MS}мс`)
 
         this.pendingCoverSrc = src
         if (this.coverDebounceTimer !== null) window.clearTimeout(this.coverDebounceTimer)
@@ -1105,27 +1560,38 @@ class CanvasBackground {
             const pending = this.pendingCoverSrc
             this.pendingCoverSrc = null
             if (!pending) return
+            log(`applyCover: дебаунс завершён, загружаем обложку src=${pending}`)
             this.loadCover(pending)
         }, COVER_DEBOUNCE_MS)
     }
 
     private loadCover(src: string): void {
         const requestId = ++this.coverRequestId
+        log(`loadCover: начало загрузки изображения (requestId=${requestId}) src=${src}`)
         const corsImage = new Image()
         corsImage.crossOrigin = 'anonymous'
         corsImage.referrerPolicy = 'no-referrer'
         corsImage.onload = () => {
-            if (requestId !== this.coverRequestId) return
+            if (requestId !== this.coverRequestId) {
+                log(`loadCover.onload: requestId=${requestId} устарел (текущий=${this.coverRequestId}), результат игнорируется`)
+                return
+            }
+            log(`loadCover.onload: изображение загружено успешно, извлекаем палитру (src=${src})`)
             const base = this.extractColors(corsImage)
             this.basePalette = base
+            this.coverTopPalette = base.slice(0, 2)
             const dominant = this.dominantBgFromPalette(base, this.settings.bgLightness)
             this.applyPalette(base, dominant)
             this.lastAppliedSrc = src
         }
         corsImage.onerror = () => {
-            if (requestId !== this.coverRequestId) return
-            warn(`applyCover: CORS load failed for ${src}, using fallback palette`)
+            if (requestId !== this.coverRequestId) {
+                log(`loadCover.onerror: requestId=${requestId} устарел (текущий=${this.coverRequestId}), ошибка игнорируется`)
+                return
+            }
+            log(`applyCover: CORS load failed for ${src}, using fallback palette`)
             this.basePalette = [...FALLBACK_PALETTE]
+            this.coverTopPalette = FALLBACK_PALETTE.slice(0, 2)
             const dominant = this.dominantBgFromPalette(FALLBACK_PALETTE, this.settings.bgLightness)
             this.applyPalette(FALLBACK_PALETTE, dominant)
             this.lastAppliedSrc = src
@@ -1135,11 +1601,21 @@ class CanvasBackground {
 
     private findCover(): HTMLImageElement | null {
         const modal = this.container.matches(MODAL_SELECTOR) ? this.container : this.container.querySelector(MODAL_SELECTOR)
-        if (!modal) return null
+        if (!modal) {
+            log('findCover: модальное окно плеера не найдено в DOM')
+            return null
+        }
         const poster = modal.querySelector(POSTER_CONTENT_SELECTOR)
-        if (!poster) return null
+        if (!poster) {
+            log('findCover: контейнер обложки (poster content) не найден внутри модального окна')
+            return null
+        }
         const img = poster.querySelector(COVER_SELECTOR)
-        return img instanceof HTMLImageElement ? img : null
+        if (!(img instanceof HTMLImageElement)) {
+            log('findCover: элемент обложки не найден или не является <img>')
+            return null
+        }
+        return img
     }
 
     private pickCoverUrl(img: HTMLImageElement): string {
@@ -1154,6 +1630,7 @@ class CanvasBackground {
                     return { url, descriptor: descriptor ?? '' }
                 })
                 .filter(c => c.url)
+            log(`pickCoverUrl: найден srcset с ${candidates.length} кандидатами`)
 
             const byPixels = candidates
                 .map(c => {
@@ -1162,7 +1639,10 @@ class CanvasBackground {
                 })
                 .filter(c => c.pixels > 0)
                 .sort((a, b) => b.pixels - a.pixels)
-            if (byPixels.length > 0) return byPixels[0].url
+            if (byPixels.length > 0) {
+                log(`pickCoverUrl: выбран вариант по ширине (${byPixels[0].pixels}w): ${byPixels[0].url}`)
+                return byPixels[0].url
+            }
 
             const byDensity = candidates
                 .map(c => {
@@ -1170,11 +1650,17 @@ class CanvasBackground {
                     return { url: c.url, density: m ? Number(m[1]) : 1 }
                 })
                 .sort((a, b) => b.density - a.density)
-            if (byDensity.length > 0 && byDensity[0].density > 1) return byDensity[0].url
+            if (byDensity.length > 0 && byDensity[0].density > 1) {
+                log(`pickCoverUrl: выбран вариант по плотности (${byDensity[0].density}x): ${byDensity[0].url}`)
+                return byDensity[0].url
+            }
 
+            log(`pickCoverUrl: ни ширина, ни плотность не определились, берём последний кандидат из srcset`)
             return candidates[candidates.length - 1].url
         }
-        return img.currentSrc || img.src || ''
+        const fallback = img.currentSrc || img.src || ''
+        log(`pickCoverUrl: srcset отсутствует, используем currentSrc/src="${fallback}"`)
+        return fallback
     }
 
     // -------------------------------------------------------------------------
@@ -1182,6 +1668,7 @@ class CanvasBackground {
     // -------------------------------------------------------------------------
 
     applySettings(settings: Partial<AddonRuntimeSettings>): void {
+        log('applySettings: получены новые настройки от PulseSync', settings)
         const next = sanitizeSettings(settings)
         const prev = this.settings
 
@@ -1221,6 +1708,7 @@ class CanvasBackground {
 
         const blobCountChanged = next.blobCountMin !== prev.blobCountMin
         const blobSpeedChanged = next.blobSpeed !== prev.blobSpeed
+        const paletteSourceChanged = next.paletteSource !== prev.paletteSource
 
         // Шейдерные эффекты (warp/flow/saturation/highlight) обновляются «на лету»
         // через uniform1f — никакой recompile шейдера и recreateBlobs() не нужен.
@@ -1252,6 +1740,14 @@ class CanvasBackground {
             this.recreateBlobs()
             log(`applySettings: blobs recreated (countMin=${next.blobCountMin}, speed=${next.blobSpeed})`)
         }
+
+        // Смена источника палитры — переключаем режим: останавливаем поллер/observer
+        // (где не нужно) и запускаем заново под новый режим. Палитра подгружается
+        // сразу же, без ожидания следующего события.
+        if (paletteSourceChanged && !this.disabled) {
+            log(`applySettings: paletteSource changed: "${prev.paletteSource}" → "${next.paletteSource}", переключаем режим`)
+            this.applyPaletteFromSource()
+        }
     }
 
     // Объединяет внутренний blur для смягчения блобов и опциональный CSS-фильтр,
@@ -1263,12 +1759,15 @@ class CanvasBackground {
     //   - CSS-blur на canvas визуально смягчает только пиксели блобов.
     private applyCanvasFilter(userFilter: string): void {
         const userPart = userFilter && userFilter !== 'none' ? ` ${userFilter}` : ''
-        this.canvas.style.filter = userPart
+        this.canvas.style.setProperty('filter', userPart, 'important')
+        this.canvas.style.setProperty('opacity', '1', 'important')
+        log(`applyCanvasFilter: итоговый CSS-фильтр канваса = "${this.canvas.style.filter || '(пусто)'}"`)
     }
 
     // Пересоздаёт блобы с новыми настройками числа/скорости, сохраняя текущую палитру.
     private recreateBlobs(): void {
         const palette = this.basePalette.length > 0 ? this.basePalette : FALLBACK_PALETTE
+        log(`recreateBlobs: пересоздаём блобы, используем ${this.basePalette.length > 0 ? 'сохранённую basePalette' : 'FALLBACK_PALETTE'}`)
         this.createBlobs(palette)
         // Все блобы стартуют в стабильном состоянии (без незавершённых переходов).
         for (const blob of this.blobs) {
@@ -1280,7 +1779,6 @@ class CanvasBackground {
     // -------------------------------------------------------------------------
     // Обновление состояния за кадр
     // -------------------------------------------------------------------------
-
     private updateBlobs(dt: number): void {
         this.animationTime += dt
         const width = this.container.clientWidth || window.innerWidth
@@ -1296,6 +1794,7 @@ class CanvasBackground {
             if (blob.color !== blob.targetColor) {
                 blob.colorMix = Math.min(1, blob.colorMix + dt / fadeMs)
                 if (blob.colorMix >= 1) {
+                    debug(`updateBlobs: переход цвета блоба завершён (${blob.color} → ${blob.targetColor})`)
                     blob.color = blob.targetColor
                 }
             }
@@ -1305,7 +1804,6 @@ class CanvasBackground {
     // -------------------------------------------------------------------------
     // WebGL2-рендер
     // -------------------------------------------------------------------------
-
     private draw(time: number): void {
         const gl = this.gl
         const width = this.container.clientWidth || window.innerWidth
@@ -1390,17 +1888,18 @@ class CanvasBackground {
         if (typeof MutationObserver !== 'undefined') {
             const modal = this.container.matches(MODAL_SELECTOR) ? this.container : this.container.querySelector(MODAL_SELECTOR)
             if (!modal) {
-                warn('observeCover: modal not found, skipping observer (will retry via reconcileBackground)')
+                log('observeCover: modal not found, skipping observer (will retry via reconcileBackground)')
             } else {
                 const root = modal.querySelector(POSTER_CONTENT_SELECTOR)
                 if (!root) {
-                    warn('observeCover: poster content not found in modal, skipping observer')
+                    log('observeCover: poster content not found in modal, skipping observer')
                 } else {
                     this.coverObserver = new MutationObserver(records => {
+                        log(`coverObserver: получено ${records.length} записей мутаций`)
                         for (const record of records) {
                             if (record.type !== 'attributes' || record.attributeName !== 'src') continue
                             const target = record.target
-                          if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
+                            if (target instanceof HTMLImageElement && target.matches(COVER_SELECTOR)) {
                                 log('cover image src changed', target.src)
                                 this.applyCover(target)
                             }
@@ -1416,11 +1915,10 @@ class CanvasBackground {
                 }
             }
         } else {
-            warn('observeCover: MutationObserver unavailable')
+            log('observeCover: MutationObserver unavailable')
         }
     }
 }
-
 // ---------------------------------------------------------------------------
 // Bootstrap (точка входа)
 // ---------------------------------------------------------------------------
@@ -1433,6 +1931,7 @@ function clearRetry(): void {
     if (retryTimer !== null) {
         window.clearTimeout(retryTimer)
         retryTimer = null
+        log('clearRetry: таймер повторной попытки отменён')
     }
 }
 
@@ -1441,7 +1940,7 @@ function ensureBackground(): void {
     const container = document.querySelector(MODAL_SELECTOR) as HTMLElement | null
     if (!container) {
         if (retriesLeft <= 0) {
-            warn(`ensureBackground: modal not found after ${MAX_RETRIES} retries, giving up`)
+            log(`ensureBackground: modal not found after ${MAX_RETRIES} retries, giving up`)
             return
         }
         retriesLeft -= 1
@@ -1459,7 +1958,8 @@ function ensureBackground(): void {
             `ensureBackground: initial settings enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
                 `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
                 `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
-                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}`,
+                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}, ` +
+                `paletteSource=${runtime.paletteSource}`,
         )
         backgroundInstance = new CanvasBackground(container, runtime)
         clearRetry()
@@ -1470,15 +1970,18 @@ function ensureBackground(): void {
 }
 
 function reconcileBackground(): void {
+    log('reconcileBackground: проверка состояния текущего фона')
     if (backgroundInstance && !backgroundInstance.isContainerAlive()) {
         log('reconcileBackground: container detached, recreating')
         backgroundInstance.destroy()
         backgroundInstance = null
     }
     if (!backgroundInstance) {
+        log('reconcileBackground: экземпляр фона отсутствует, вызываем ensureBackground()')
         ensureBackground()
         return
     }
+    log('reconcileBackground: экземпляр фона жив, запрашиваем обновление палитры')
     backgroundInstance.requestPaletteRefresh()
 }
 
@@ -1511,13 +2014,15 @@ function watchModal(): void {
             flow: readNumberSetting(nextSettings, SETTING_KEY_FLOW, DEFAULT_RUNTIME_SETTINGS.flow),
             saturation: readNumberSetting(nextSettings, SETTING_KEY_SATURATION, DEFAULT_RUNTIME_SETTINGS.saturation),
             highlight: readNumberSetting(nextSettings, SETTING_KEY_HIGHLIGHT, DEFAULT_RUNTIME_SETTINGS.highlight),
+            paletteSource: readSelectSetting(nextSettings, SETTING_KEY_PALETTE_SOURCE, DEFAULT_RUNTIME_SETTINGS.paletteSource, PALETTE_SOURCE_VALUES),
         }
         log(
             `settings changed: enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
                 `filter=${runtime.filter}, ` +
                 `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
                 `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
-                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}`,
+                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}, ` +
+                `paletteSource=${runtime.paletteSource}`,
         )
         backgroundInstance?.applySettings(runtime)
     })
@@ -1525,6 +2030,7 @@ function watchModal(): void {
     ensureBackground()
 
     const observer = new MutationObserver(records => {
+        debug(`modal watcher: получено ${records.length} записей childList-мутаций из document.body`)
         for (const record of records) {
             if (record.type !== 'childList') continue
             const interesting =
@@ -1533,6 +2039,7 @@ function watchModal(): void {
                 anyAddedNodeMatches(record.addedNodes, MODAL_SELECTOR) ||
                 anyAddedNodeMatches(record.addedNodes, COVER_SELECTOR)
             if (interesting) {
+                debug('modal watcher: обнаружено релевантное изменение DOM (модалка/обложка), вызываем reconcileBackground()')
                 if (retryTimer === null) reconcileBackground()
                 return
             }
