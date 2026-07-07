@@ -788,6 +788,13 @@ class CanvasBackground {
     private lastJsonTrackId: string | null = null
     private lastPaletteUpdateTime: number = 0
 
+    // Источник палитры: 'cover' (обложка) / 'derivedColors' (JSON 127.0.0.1:2007).
+    // Если usingJsonPalette=true — applyCover/loadCover игнорируются,
+    // поллер применяет палитру от derivedColors при смене track.id.
+    private usingJsonPalette = false
+    private jsonPoller: TrackJsonPoller | null = null
+    private lastJsonTrackId: string | null = null
+
     constructor(container: HTMLElement, initialSettings?: Partial<AddonRuntimeSettings>) {
         this.container = container
 
