@@ -778,6 +778,7 @@ class CanvasBackground {
     private lastAppliedSrc: string | null = null
     private coverDebounceTimer: number | null = null
     private pendingCoverSrc: string | null = null
+    private lastAppliedTrackId: string | null = null
 
     // Источник палитры: 'cover' (обложка) / 'derivedColors' (JSON 127.0.0.1:2007).
     // Если usingJsonPalette=true — applyCover/loadCover игнорируются,
@@ -785,6 +786,7 @@ class CanvasBackground {
     private usingJsonPalette = false
     private jsonPoller: TrackJsonPoller | null = null
     private lastJsonTrackId: string | null = null
+    private lastPaletteUpdateTime: number = 0
 
     constructor(container: HTMLElement, initialSettings?: Partial<AddonRuntimeSettings>) {
         this.container = container
@@ -1011,7 +1013,7 @@ class CanvasBackground {
     //   - cover:      подгрузить обложку + запустить observer src.
     //   - derivedColors: запустить JSON-поллер, observer обложки не нужен.
     //   - mixed:      запустить поллер + подгрузить обложку + observer (нужен для coverTopPalette).
-    private applyPaletteFromSource(): void {
+    private applyPaletteFromSource(force: boolean = false): void {
         const source = String(this.settings.paletteSource)
         log(`applyPaletteFromSource: текущий источник палитры = "${source}"`)
 
@@ -1019,7 +1021,8 @@ class CanvasBackground {
         this.jsonPoller?.stop()
         this.jsonPoller = null
         this.lastJsonTrackId = null
-
+        this.lastAppliedTrackId = null
+        this.lastPaletteUpdateTime = 0
         // Отключаем предыдущий observer обложки (если был из другого режима) и
         // инвалидируем debounce/in-flight загрузку обложки, чтобы устаревший
         // результат не перезаписал палитру нового режима после переключения.
@@ -1045,7 +1048,7 @@ class CanvasBackground {
             this.startJsonPoller()
             // mixed-режим нуждается в coverTopPalette — обложка подгружается параллельно.
             const initial = this.findCover()
-            if (initial) this.applyCover(initial, true)
+            if (initial) this.applyCover(initial, force)
             this.observeCover()
             log('applyPaletteFromSource: режим "mixed" — поллер + observer обложки активны')
             return
@@ -1053,7 +1056,7 @@ class CanvasBackground {
 
         // source === PALETTE_SOURCE_COVER (или дефолт)
         const initial = this.findCover()
-        if (initial) this.applyCover(initial, true)
+        if (initial) this.applyCover(initial, force)
         this.observeCover()
         log('applyPaletteFromSource: режим "cover" — observer обложки активен')
     }
@@ -1087,12 +1090,11 @@ class CanvasBackground {
         }
         this.lastJsonTrackId = update.id
         log(`applyTrackUpdate: новый track.id="${update.id}", применяем палитру (source=${source})`)
-
         const palette =
             source === PALETTE_SOURCE_MIXED ? mixDerivedWithCover(update.colors, this.coverTopPalette) : expandDerivedPalette(update.colors)
         const dominant = this.dominantBgFromPalette(palette, this.settings.bgLightness)
         this.basePalette = palette
-        this.applyPalette(palette, dominant)
+        this.applyPalette(palette, dominant, update.id)
     }
 
     // -------------------------------------------------------------------------
@@ -1226,9 +1228,17 @@ class CanvasBackground {
         log(`created ${this.blobs.length} blobs from palette (speedScale=${speedScale})`, colors)
     }
 
-    private updatePalette(colors: string[]): void {
+    private updatePalette(colors: string[], trackId?: string | null): void {
+        if (trackId && trackId === this.lastAppliedTrackId) {
+            log(`updatePalette: пропуск повторного вызова для trackId="${trackId}" (палитра уже применена)`)
+            return
+        }
+        const now = Date.now()
+        if (now - this.lastPaletteUpdateTime < 100) {
+            log(`updatePalette: пропуск обновления (прошло ${now - this.lastPaletteUpdateTime}мс < 1000мс)`)
+            return
+        }
         if (this.blobs.length === 0 || colors.length === 0) return
-
         // Подбираем для каждого блоба ближайший новый цвет по евклидову расстоянию в RGB
         // (тот же алгоритм, что в исходной 2D-версии).
         const initialTargets = this.blobs.map((_, i) => colors[i % colors.length])
@@ -1282,7 +1292,10 @@ class CanvasBackground {
             blob.targetColor = newTargetColor
             blob.colorMix = 0
         })
-
+        if (trackId) {
+            this.lastAppliedTrackId = trackId
+        }
+        this.lastPaletteUpdateTime = Date.now()
         log('palette updated', colors)
     }
 
@@ -1505,12 +1518,13 @@ class CanvasBackground {
     // Применение палитры
     // -------------------------------------------------------------------------
 
-    private applyPalette(colors: string[], dominant?: string): void {
+    private applyPalette(colors: string[], dominant?: string, trackId?: string | null): void {
         const wasEmpty = this.blobs.length === 0
         if (wasEmpty) {
             this.createBlobs(colors)
+            if (trackId) this.lastAppliedTrackId = trackId
         } else {
-            this.updatePalette(colors)
+            this.updatePalette(colors, trackId)
         }
 
         if (dominant) {
@@ -1746,7 +1760,7 @@ class CanvasBackground {
         // сразу же, без ожидания следующего события.
         if (paletteSourceChanged && !this.disabled) {
             log(`applySettings: paletteSource changed: "${prev.paletteSource}" → "${next.paletteSource}", переключаем режим`)
-            this.applyPaletteFromSource()
+            this.applyPaletteFromSource(true)
         }
     }
 
