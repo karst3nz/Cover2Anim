@@ -8,23 +8,57 @@
                     "name": "Включить аддон",
                     "description": "Показывать анимированный фон в полноэкранном плеере.",
                     "type": "button",
-                    "bool": true,
-                    "defaultParameter": true
+                    "value": true,
+                    "defaultValue": true
+                },
+                {
+                    "id": "paletteSource",
+                    "name": "Источник палитры",
+                    "description": "Откуда брать цвета блобов и фона",
+                    "type": "selector",
+                    "value": "cover",
+                    "options": [
+                        {
+                            "name": "Из обложки",
+                            "id": "cover",
+                            "event": "cover"
+                        },
+                        {
+                            "name": "Из акцентных цветов ЯМ",
+                            "id": "derivedColors",
+                            "event": "derivedColors"
+                        },
+                        {
+                            "name": "Смешанный (4 цвета из обложки, 2 цвета из ЯМ)",
+                            "id": "mixed",
+                            "event": "mixed"
+                        }
+                    ],
+                    "defaultValue": "0"
                 },
                 {
                     "id": "showFps",
                     "name": "Показывать FPS",
                     "description": "Отображать счётчик кадров в секунду поверх анимации.",
                     "type": "button",
-                    "bool": true,
-                    "defaultParameter": false
+                    "value": true,
+                    "defaultValue": false
+                },
+                {
+                    "id": "enableLogging",
+                    "name": "Включить логи в консоли",
+                    "description": "Отображать логи в консоли",
+                    "type": "button",
+                    "value": true,
+                    "defaultValue": false
                 },
                 {
                     "id": "filter",
                     "name": "CSS filter",
-                    "description": "Значение CSS-свойства filter для canvas-фона. По умолчанию blur(100px) — мягкое свечение blob'ов. Можно комбинировать: blur(80px) saturate(1.2) contrast(1.05). Пустая строка отключает фильтр.",
+                    "description": "Значение CSS-свойства filter для canvas-фона. По умолчанию blur(100px) — мягкое свечение blob'ов. Можно комбинировать: blur(80px) saturate(1.2) contrast(1.05). Пустая строка ставит blur(100px)",
                     "type": "text",
-                    "defaultParameter": "blur(80px) saturate(1.2) contrast(1.05)"
+                    "value": "",
+                    "defaultValue": "blur(80px) saturate(1.2) contrast(1.05)"
                 },
                 {
                     "id": "paletteFadeMs",
@@ -34,7 +68,8 @@
                     "min": 0,
                     "max": 5000,
                     "step": 50,
-                    "defaultParameter": 2250
+                    "value": 0,
+                    "defaultValue": 2200
                 },
                 {
                     "id": "paletteBlendSpeed",
@@ -44,17 +79,19 @@
                     "min": 0.5,
                     "max": 3,
                     "step": 0.1,
-                    "defaultParameter": 1.3
+                    "value": 0,
+                    "defaultValue": 1.3
                 },
                 {
                     "id": "blobCountMin",
-                    "name": "Минимум blob'ов",
-                    "description": "Минимальное число blob'ов",
+                    "name": "Количество blob'ов",
+                    "description": "Количество отображаемых blob'ов",
                     "type": "slider",
-                    "min": 32,
-                    "max": 128,
+                    "min": 16,
+                    "max": 256,
                     "step": 4,
-                    "defaultParameter": 96
+                    "value": 0,
+                    "defaultValue": 40
                 },
                 {
                     "id": "blobSpeed",
@@ -64,17 +101,63 @@
                     "min": 0.25,
                     "max": 4,
                     "step": 0.25,
-                    "defaultParameter": 1.25
+                    "value": 0,
+                    "defaultValue": 1.25
                 },
                 {
                     "id": "bgLightness",
                     "name": "Яркость фона",
-                    "description": "Насколько ярко bgDiv повторяет доминирующий цвет обложки. 1 — фон = доминирующий цвет, 0.9 — почти совпадает (по умолчанию), 0.5 — приглушённый, 0 — тёмный с лёгким оттенком обложки.",
+                    "description": "Насколько ярко задний фон повторяет доминирующий цвет обложки. 1 — фон = доминирующий цвет, 0.9 — почти совпадает (по умолчанию), 0.5 — приглушённый, 0 — тёмный с лёгким оттенком обложки.",
                     "type": "slider",
                     "min": 0,
                     "max": 1,
                     "step": 0.01,
-                    "defaultParameter": 0.9
+                    "value": 0,
+                    "defaultValue": 0.9
+                },
+                {
+                    "id": "warp",
+                    "name": "Сила domain warping",
+                    "description": "Насколько сильно форма пятна течёт и деформируется (FBM-шум в шейдере). 0 — почти статичные кляксы, 0.6 — мягкие облака (по умолчанию), 1 — выраженные текучие облака",
+                    "type": "slider",
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.01,
+                    "value": 0,
+                    "defaultValue": 0.6
+                },
+                {
+                    "id": "flow",
+                    "name": "Скорость течения",
+                    "description": "Как быстро «кипит» внутренность облака. 0 — форма почти статична, 0.5 — плавное дыхание (по умолчанию), 1 — быстрое течение.",
+                    "type": "slider",
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.01,
+                    "value": 0,
+                    "defaultValue": 0.5
+                },
+                {
+                    "id": "saturation",
+                    "name": "Насыщенность цвета",
+                    "description": "Дополнительный boost насыщенности в шейдере (поверх CSS-фильтра). 1 — без усиления, 1.15 — сочное, 1.5 — максимально ярко. Меньше 1 — приглушённый пастельный фон.",
+                    "type": "slider",
+                    "min": 0.8,
+                    "max": 1.5,
+                    "step": 0.01,
+                    "value": 0,
+                    "defaultValue": 1.15
+                },
+                {
+                    "id": "highlight",
+                    "name": "Подсветка центра",
+                    "description": "Яркость центра пятна («горячая середина»). 0 — равномерный цвет, 0.4 — мягкий блик (по умолчанию), 1 — выраженное осветление в центре",
+                    "type": "slider",
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.01,
+                    "value": 0,
+                    "defaultValue": 0.4
                 }
             ]
         }

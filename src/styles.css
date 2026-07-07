@@ -11,10 +11,6 @@ div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode::after {
     height: 100%;
     z-index: 2;
     pointer-events: none;
-    /* filter живёт в --c2a-filter, которую JS задаёт из настроек PulseSync.
-       Fallback blur(100px) совпадает с прежним ctx.filter на десктопе,
-       чтобы при незагруженном скрипте анимация не выглядела «сырой». */
-    filter: var(--c2a-filter);
 }
 
 .c2a-bg-div {
@@ -29,7 +25,7 @@ div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode > *:not(.c2a-canvas-bg):
 .c2a-fps {
     position: absolute;
     top: 12px;
-    right: 12px;
+    left: 12px;
     z-index: 10;
     padding: 4px 8px;
     border-radius: 6px;

@@ -3,6 +3,8 @@
 // (число blob'ов, скорость анимации, размеры текстур, шаги сэмплирования и т.д.)
 // без необходимости лезть в логику CanvasBackground.
 
+import { constants } from 'node:quic'
+
 // --- DOM-селекторы модалки полноэкранного плеера ---
 const MODAL_SELECTOR = 'div[data-test-id="FULLSCREEN_PLAYER_MODAL"]'
 const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT"]'
@@ -57,34 +59,67 @@ const BG_LIGHTNESS_DARK_FLOOR = 0.18
 const MOBILE_BREAKPOINT_PX = 768
 
 // --- Blob'ы: количество ---
-const BLOB_COUNT_MIN = 96
+// Снижено с 96 до 40: при 1920×1080 каждый блоб радиуса 360-720 — это огромный
+// overdraw (каждый пиксель рисуется ~30 раз). Шейдер всё равно процедурный и
+// выглядит «полно» даже с 40 блобами, потому что они крупные.
+const BLOB_COUNT_MIN = 40
 const BLOB_COUNT_MAX = BLOB_COUNT_MIN * 2
-const BLOB_COUNT_MIN_SETTING_MIN = 32
-const BLOB_COUNT_MIN_SETTING_MAX = 128
+const BLOB_COUNT_MIN_SETTING_MIN = 16
+const BLOB_COUNT_MIN_SETTING_MAX = 256
 
 // Приблизительная «ширина холста» в пикселях на один blob — даёт плавное масштабирование.
-const BLOB_COUNT_DIVISOR_PX = 180
+const BLOB_COUNT_DIVISOR_PX = 240
 
 // --- Blob'ы: радиус (базовый, без пульсации) ---
-const BLOB_RADIUS_MIN = 250
+// Облака в стиле Apple Music крупнее прежних клякс: блоб занимает ~30-50% короткой стороны canvas.
+// Уменьшено с 360 до 280 для баланса между «плотным» и «невесомым» фоном.
+const BLOB_RADIUS_MIN = 280
 const BLOB_RADIUS_MAX = BLOB_RADIUS_MIN * 2
 // Стартовое значение currentRadius до первого updateBlobs (выровнено по середине диапазона).
-const BLOB_RADIUS_INITIAL = 300
+const BLOB_RADIUS_INITIAL = 350
 
 // --- Blob'ы: амплитуда пульсации радиуса ---
-const BLOB_PULSE_AMPLITUDE = 80
+const BLOB_PULSE_AMPLITUDE = 90
 
 // --- Blob'ы: орбита (амплитуда колебаний baseX/baseY) ---
-const BLOB_ORBIT_MIN = 150
-const BLOB_ORBIT_MAX = 650
+// Орбита крупнее, чтобы блобы реально «плавали» через сцену, а не дёргались на месте.
+const BLOB_ORBIT_MIN = 200
+const BLOB_ORBIT_MAX = 800
 
 // --- Blob'ы: скорости ---
-// Дрейф X/Y: множитель t в sin/cos, управляет «плавностью» перемещения.
-const BLOB_SPEED_DRIFT_MIN = 0.0001
-const BLOB_SPEED_DRIFT_MAX = 0.0004
-// Пульсация радиуса: множитель t в sin.
-const BLOB_SPEED_PULSE_MIN = 0.0003
-const BLOB_SPEED_PULSE_MAX = 0.0007
+// Дрейф X/Y: множитель t в sin/cos. Скорости снижены ~1.5x — облака «дышат»,
+// а не бегают по сцене, что и даёт медитативный эффект Apple Music.
+const BLOB_SPEED_DRIFT_MIN = 0.00007
+const BLOB_SPEED_DRIFT_MAX = 0.00025
+// Пульсация радиуса: множитель t в sin. Скорость пульса тоже ниже, чтобы дыхание
+// было плавным и незаметным на глаз.
+const BLOB_SPEED_PULSE_MIN = 0.0002
+const BLOB_SPEED_PULSE_MAX = 0.00045
+
+// --- Blob'ы: шейдерные эффекты ---
+// Сила domain warping в фрагментном шейдере: 0 = почти статичные кляксы,
+// 1 = ярко выраженные «облака» с текучей формой. UI-слайдер PulseSync.
+const BLOB_WARP_DEFAULT = 0.6
+const BLOB_WARP_MIN = 0
+const BLOB_WARP_MAX = 1
+
+// Скорость течения шума (как быстро «кипит» внутренность облака).
+// 0 = форма почти статична, 1 = форма быстро течёт.
+const BLOB_FLOW_DEFAULT = 0.5
+const BLOB_FLOW_MIN = 0
+const BLOB_FLOW_MAX = 1
+
+// Дополнительная насыщенность в шейдере (поверх CSS-фильтра). 1 = без усиления,
+// 1.15 = сочное Apple-Music-как-в-рекламе. <1 = приглушённый пастельный фон.
+const BLOB_SATURATION_DEFAULT = 1.15
+const BLOB_SATURATION_MIN = 0.8
+const BLOB_SATURATION_MAX = 1.5
+
+// Подсветка центра пятна: «горячая середина», как у бликов в Apple Music.
+// 0 = равномерный цвет, 1 = заметное осветление в центре.
+const BLOB_HIGHLIGHT_DEFAULT = 0.4
+const BLOB_HIGHLIGHT_MIN = 0
+const BLOB_HIGHLIGHT_MAX = 1
 
 // Скорость блобов
 const BLOB_SPEED_MIN = 0.25
@@ -96,15 +131,9 @@ const BLOB_SPEED_MAX = 4
 const PALETTE_WAVE_SPREAD = 0.25
 
 // --- Текстура blob'а (offscreen canvas) ---
-// Размер стороны квадратной текстуры в пикселях. 512 — компромисс между гладким градиентом
-// и памятью под ~80 текстур на тяжёлых пресетах.
+// Больше не используется: альфа блоба формируется процедурно во фрагментном шейдере
+// (FBM + domain warping), offscreen canvas убран ради экономии памяти GPU.
 const BLOB_TEXTURE_SIZE_PX = 512
-
-// Альфа ядра/середины/края радиального градиента текстуры (hex).
-// Ядро 0xcc (≈0.8) вместо 0xff: при слиянии 3-4 blob'ов source-over не клиппит RGB в 255.
-const BLOB_TEXTURE_ALPHA_CORE = 'cc'
-const BLOB_TEXTURE_ALPHA_MID = '99'
-const BLOB_TEXTURE_ALPHA_EDGE = '00'
 
 // --- Поворот холста ---
 // Глобальное вращение canvas вокруг центра (рад/мс). 0.00001 — едва заметный «дышащий» поворот.
@@ -131,6 +160,26 @@ const CLUSTER_MERGE_RGB_DIST = 70
 // Сколько цветов берём из кластеров в финальную палитру.
 const EXTRACTED_PALETTE_SIZE = 6
 
+// --- Источник палитры ---
+//   'cover'         — текущее поведение, 6 цветов извлекаются из PNG-обложки.
+//   'derivedColors' — 4 цвета из track.derivedColors (accent, waveText, miniPlayer, average),
+//                     дополняются до 6 повтором первых двух.
+//   'mixed'         — HSL-блендинг: 4 derived-цвета усредняются с 2 топовыми цветами обложки
+//                     в HSL-пространстве (50/50), итого 6 уникальных цветов.
+const PALETTE_SOURCE_COVER = '0' as const
+const PALETTE_SOURCE_DERIVED = '1' as const
+const PALETTE_SOURCE_MIXED = '2' as const
+
+const PALETTE_SOURCE_VALUES = [PALETTE_SOURCE_COVER, PALETTE_SOURCE_DERIVED, PALETTE_SOURCE_MIXED] as const
+
+type PaletteSource = (typeof PALETTE_SOURCE_VALUES)[number]
+const PALETTE_SOURCE_DEFAULT: PaletteSource = PALETTE_SOURCE_COVER
+
+// URL локального сервера, отдающего JSON текущего трека Яндекс Музыки (fallback для pulsesyncApi).
+const JSON_POLLER_URL = 'http://127.0.0.1:2007/get_track'
+// Период опроса JSON-эндпоинта. 2.5 с — баланс между свежестью и нагрузкой.
+const JSON_POLLER_INTERVAL_MS = 2500
+
 // --- Логирование ---
 const LOG_PREFIX = '[Cover2Anim]'
 
@@ -148,9 +197,6 @@ export {
     BLOB_SPEED_DRIFT_MIN,
     BLOB_SPEED_PULSE_MAX,
     BLOB_SPEED_PULSE_MIN,
-    BLOB_TEXTURE_ALPHA_CORE,
-    BLOB_TEXTURE_ALPHA_EDGE,
-    BLOB_TEXTURE_ALPHA_MID,
     BLOB_TEXTURE_SIZE_PX,
     BLUR_DESKTOP_PX,
     BLUR_MOBILE_PX,
@@ -186,4 +232,23 @@ export {
     PALETTE_BLEND_SPEED_MIN,
     PALETTE_FADE_MS_MAX,
     PALETTE_FADE_MS_MIN,
+    BLOB_WARP_DEFAULT,
+    BLOB_WARP_MIN,
+    BLOB_WARP_MAX,
+    BLOB_FLOW_DEFAULT,
+    BLOB_FLOW_MIN,
+    BLOB_FLOW_MAX,
+    BLOB_SATURATION_DEFAULT,
+    BLOB_SATURATION_MIN,
+    BLOB_SATURATION_MAX,
+    BLOB_HIGHLIGHT_DEFAULT,
+    BLOB_HIGHLIGHT_MIN,
+    BLOB_HIGHLIGHT_MAX,
+    JSON_POLLER_INTERVAL_MS,
+    JSON_POLLER_URL,
+    PALETTE_SOURCE_COVER,
+    PALETTE_SOURCE_DEFAULT,
+    PALETTE_SOURCE_DERIVED,
+    PALETTE_SOURCE_MIXED,
+    PALETTE_SOURCE_VALUES,
 }
