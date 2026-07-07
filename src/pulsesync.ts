@@ -1,4 +1,5 @@
 import type { AddonSettingValue, AddonSettings, AddonSettingsStore } from '@pulsesync/yamusic-types'
+import { log } from 'node:console'
 
 function unwrapSetting<T>(entry: AddonSettingValue<T> | unknown, fallback: T): T {
     if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
@@ -37,4 +38,26 @@ export function readNumberSetting(settings: AddonSettings, key: string, fallback
     const raw = unwrapSetting<unknown>(settings[key], fallback)
     const parsed = typeof raw === 'number' ? raw : Number(raw)
     return Number.isFinite(parsed) ? parsed : fallback
+}
+
+export function readSelectSetting<T extends string>(settings: AddonSettings, key: string, fallback: T, allowedValues: readonly T[]): T {
+    const raw = unwrapSetting<unknown>(settings[key], fallback)
+
+    // Случай 1: PulseSync вернул числовой индекс опции
+    if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw < allowedValues.length) {
+        return allowedValues[raw]
+    }
+
+    // Случай 2: PulseSync вернул строковый ключ (старые билды / ручное редактирование)
+    if (typeof raw === 'string') {
+        return (allowedValues as readonly string[]).includes(raw) ? (raw as T) : fallback
+    }
+
+    // Случай 3: строка-число ("0", "1", "2") — пробуем распарсить
+    if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+        const idx = Number(raw)
+        if (idx >= 0 && idx < allowedValues.length) return allowedValues[idx]
+    }
+
+    return fallback
 }
