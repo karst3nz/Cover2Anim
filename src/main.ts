@@ -69,6 +69,7 @@ import {
     POSTER_CONTENT_SELECTOR,
     RETRY_DELAY_MS,
 } from './constants'
+import { AddonSettings } from '@pulsesync/yamusic-types'
 
 // ---------------------------------------------------------------------------
 // Шейдеры WebGL2
@@ -300,20 +301,24 @@ type AddonRuntimeSettings = {
 // Хелперы настроек (без изменений)
 // ---------------------------------------------------------------------------
 
-const SETTING_KEY_ENABLED = 'enabled'
-const SETTING_KEY_PALETTE_SOURCE = 'paletteSource'
-const SETTING_KEY_SHOW_FPS = 'showFps'
-const SETTING_KEY_ENABLE_LOGGING = 'enableLogging'
-const SETTING_KEY_FILTER = 'filter'
-const SETTING_KEY_PALETTE_FADE_MS = 'paletteFadeMs'
-const SETTING_KEY_PALETTE_BLEND_SPEED = 'paletteBlendSpeed'
-const SETTING_KEY_BLOB_COUNT_MIN = 'blobCountMin'
-const SETTING_KEY_BLOB_SPEED = 'blobSpeed'
-const SETTING_KEY_BG_LIGHTNESS = 'bgLightness'
-const SETTING_KEY_WARP = 'warp'
-const SETTING_KEY_FLOW = 'flow'
-const SETTING_KEY_SATURATION = 'saturation'
-const SETTING_KEY_HIGHLIGHT = 'highlight'
+// Единая карта ключей настроек PulseSync → удобно перебирать и не даёт
+// разъехаться именам констант и реальным ключам в хранилище.
+const SETTING_KEYS = {
+    enabled: 'enabled',
+    paletteSource: 'paletteSource',
+    showFps: 'showFps',
+    enableLogging: 'enableLogging',
+    filter: 'filter',
+    paletteFadeMs: 'paletteFadeMs',
+    paletteBlendSpeed: 'paletteBlendSpeed',
+    blobCountMin: 'blobCountMin',
+    blobSpeed: 'blobSpeed',
+    bgLightness: 'bgLightness',
+    warp: 'warp',
+    flow: 'flow',
+    saturation: 'saturation',
+    highlight: 'highlight',
+} as const
 
 const DEFAULT_RUNTIME_SETTINGS: AddonRuntimeSettings = {
     enabled: true,
@@ -395,27 +400,48 @@ function sanitizeSettings(raw: Partial<AddonRuntimeSettings>): AddonRuntimeSetti
     return result
 }
 
-function readRuntimeSettings(): Partial<AddonRuntimeSettings> {
+// Читает «сырое» значение настроек PulseSync (объект settings, полученный
+// через store.getCurrent() или из колбэка onChange) и приводит его к
+// AddonRuntimeSettings. Единая точка чтения — используется и при первом
+// старте (readRuntimeSettings), и при live-обновлении настроек (watchModal),
+// чтобы порядок полей и дефолты не могли разъехаться между двумя местами.
+function buildRuntimeSettingsFromStore(settings: AddonSettings): AddonRuntimeSettings {
+    return {
+        enabled: readBooleanSetting(settings, SETTING_KEYS.enabled, DEFAULT_RUNTIME_SETTINGS.enabled),
+        showFps: readBooleanSetting(settings, SETTING_KEYS.showFps, DEFAULT_RUNTIME_SETTINGS.showFps),
+        enableLogging: readBooleanSetting(settings, SETTING_KEYS.enableLogging, DEFAULT_RUNTIME_SETTINGS.enableLogging),
+        filter: readStringSetting(settings, SETTING_KEYS.filter, DEFAULT_RUNTIME_SETTINGS.filter),
+        paletteFadeMs: readNumberSetting(settings, SETTING_KEYS.paletteFadeMs, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
+        paletteBlendSpeed: readNumberSetting(settings, SETTING_KEYS.paletteBlendSpeed, DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed),
+        blobCountMin: readNumberSetting(settings, SETTING_KEYS.blobCountMin, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
+        blobSpeed: readNumberSetting(settings, SETTING_KEYS.blobSpeed, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
+        bgLightness: readNumberSetting(settings, SETTING_KEYS.bgLightness, DEFAULT_RUNTIME_SETTINGS.bgLightness),
+        warp: readNumberSetting(settings, SETTING_KEYS.warp, DEFAULT_RUNTIME_SETTINGS.warp),
+        flow: readNumberSetting(settings, SETTING_KEYS.flow, DEFAULT_RUNTIME_SETTINGS.flow),
+        saturation: readNumberSetting(settings, SETTING_KEYS.saturation, DEFAULT_RUNTIME_SETTINGS.saturation),
+        highlight: readNumberSetting(settings, SETTING_KEYS.highlight, DEFAULT_RUNTIME_SETTINGS.highlight),
+        paletteSource: readSelectSetting(settings, SETTING_KEYS.paletteSource, DEFAULT_RUNTIME_SETTINGS.paletteSource, PALETTE_SOURCE_VALUES),
+    }
+}
+
+// Формирует лог-строку с ключевыми runtime-параметрами — используется и при
+// старте, и при каждом изменении настроек, чтобы формат сообщения не расходился.
+function describeRuntimeSettings(runtime: AddonRuntimeSettings): string {
+    return (
+        `enabled=${runtime.enabled}, showFps=${runtime.showFps}, filter=${runtime.filter}, ` +
+        `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
+        `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
+        `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}, ` +
+        `paletteSource=${runtime.paletteSource}`
+    )
+}
+
+function readRuntimeSettings(): AddonRuntimeSettings {
     log('readRuntimeSettings: читаю текущие настройки аддона из хранилища PulseSync')
     const settingsStore = getAddonSettings(addonConfig.name)
-    const settings = settingsStore.getCurrent()
-    log('readRuntimeSettings: сырые данные из хранилища получены', settings)
-    return {
-        enabled: readBooleanSetting(settings, SETTING_KEY_ENABLED, DEFAULT_RUNTIME_SETTINGS.enabled),
-        showFps: readBooleanSetting(settings, SETTING_KEY_SHOW_FPS, DEFAULT_RUNTIME_SETTINGS.showFps),
-        enableLogging: readBooleanSetting(settings, SETTING_KEY_ENABLE_LOGGING, DEFAULT_RUNTIME_SETTINGS.enableLogging),
-        filter: readStringSetting(settings, SETTING_KEY_FILTER, DEFAULT_RUNTIME_SETTINGS.filter),
-        paletteFadeMs: readNumberSetting(settings, SETTING_KEY_PALETTE_FADE_MS, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
-        paletteBlendSpeed: readNumberSetting(settings, SETTING_KEY_PALETTE_BLEND_SPEED, DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed),
-        blobCountMin: readNumberSetting(settings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
-        blobSpeed: readNumberSetting(settings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
-        bgLightness: readNumberSetting(settings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
-        warp: readNumberSetting(settings, SETTING_KEY_WARP, DEFAULT_RUNTIME_SETTINGS.warp),
-        flow: readNumberSetting(settings, SETTING_KEY_FLOW, DEFAULT_RUNTIME_SETTINGS.flow),
-        saturation: readNumberSetting(settings, SETTING_KEY_SATURATION, DEFAULT_RUNTIME_SETTINGS.saturation),
-        highlight: readNumberSetting(settings, SETTING_KEY_HIGHLIGHT, DEFAULT_RUNTIME_SETTINGS.highlight),
-        paletteSource: readSelectSetting(settings, SETTING_KEY_PALETTE_SOURCE, DEFAULT_RUNTIME_SETTINGS.paletteSource, PALETTE_SOURCE_VALUES),
-    }
+    const rawSettings = settingsStore.getCurrent()
+    log('readRuntimeSettings: сырые данные из хранилища получены', rawSettings)
+    return buildRuntimeSettingsFromStore(rawSettings)
 }
 
 // ---------------------------------------------------------------------------
@@ -652,31 +678,82 @@ function mixDerivedWithCover(derived: readonly [string, string, string, string],
     return expanded
 }
 
-// Локальные HSL-хелперы (изолированы от this.rgbToHsl, чтобы их можно было
-// использовать на уровне модуля).
-function hexToHsl(hex: string): { h: number; s: number; l: number } {
-    const value = hex.startsWith('#') ? hex.slice(1) : hex
-    if (value.length !== 6) return { h: 0, s: 0, l: 0 }
-    const r = parseInt(value.slice(0, 2), 16) / 255
-    const g = parseInt(value.slice(2, 4), 16) / 255
-    const b = parseInt(value.slice(4, 6), 16) / 255
-    const max = Math.max(r, g, b)
-    const min = Math.min(r, g, b)
+// ---------------------------------------------------------------------------
+// Цветовые утилиты — единая реализация hex/rgb/hsl-конвертации.
+// Используются и на уровне модуля (blendHslHalf/mixDerivedWithCover), и
+// внутри CanvasBackground (блобы, переходы фона, извлечение палитры из
+// обложки), чтобы не поддерживать две параллельные реализации одной и той же
+// математики.
+// ---------------------------------------------------------------------------
+
+function clamp01(value: number): number {
+    return Math.max(0, Math.min(1, value))
+}
+
+function lerp(a: number, b: number, t: number): number {
+    return a + (b - a) * t
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+    return {
+        r: parseInt(hex.slice(1, 3), 16),
+        g: parseInt(hex.slice(3, 5), 16),
+        b: parseInt(hex.slice(5, 7), 16),
+    }
+}
+
+// Нормализует hex-цвет к тройке float [0, 1] — формат, который ожидают
+// WebGL-юниформы u_color/u_prevColor.
+function hexToRgbFloat(hex: string): [number, number, number] {
+    const { r, g, b } = hexToRgb(hex)
+    return [r / 255, g / 255, b / 255]
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+    return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')
+}
+
+// Линейно интерполирует между двумя hex-цветами в RGB-пространстве.
+function blendHex(a: string, b: string, t: number): string {
+    const ca = hexToRgb(a)
+    const cb = hexToRgb(b)
+    return rgbToHex(Math.round(lerp(ca.r, cb.r, t)), Math.round(lerp(ca.g, cb.g, t)), Math.round(lerp(ca.b, cb.b, t)))
+}
+
+function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
+    const rn = r / 255
+    const gn = g / 255
+    const bn = b / 255
+    const max = Math.max(rn, gn, bn)
+    const min = Math.min(rn, gn, bn)
     const l = (max + min) / 2
     let h = 0
     let s = 0
     if (max !== min) {
         const d = max - min
         s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
-        if (max === r) h = (g - b) / d + (g < b ? 6 : 0)
-        else if (max === g) h = (b - r) / d + 2
-        else h = (r - g) / d + 4
+        switch (max) {
+            case rn:
+                h = (gn - bn) / d + (gn < bn ? 6 : 0)
+                break
+            case gn:
+                h = (bn - rn) / d + 2
+                break
+            default:
+                h = (rn - gn) / d + 4
+        }
         h *= 60
     }
     return { h, s, l }
 }
 
-function hslToHex(h: number, s: number, l: number): string {
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
+    const { r, g, b } = hexToRgb(hex)
+    return rgbToHsl(r, g, b)
+}
+
+// HSL → (r, g, b) в [0, 255]. h в градусах [0, 360), s/l в [0, 1].
+function hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
     const c = (1 - Math.abs(2 * l - 1)) * s
     const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
     const m = l - c / 2
@@ -708,11 +785,29 @@ function hslToHex(h: number, s: number, l: number): string {
         g1 = 0
         b1 = x
     }
-    const toHex = (v: number): string => {
-        const n = Math.round((v + m) * 255)
-        return n.toString(16).padStart(2, '0')
+    return {
+        r: Math.round((r1 + m) * 255),
+        g: Math.round((g1 + m) * 255),
+        b: Math.round((b1 + m) * 255),
     }
-    return `#${toHex(r1)}${toHex(g1)}${toHex(b1)}`
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+    const { r, g, b } = hslToRgb(h, s, l)
+    return rgbToHex(r, g, b)
+}
+
+// Вычисляет цвет bgDiv по топовому кластеру палитры обложки: сохраняет H и S,
+// а L линейно интерполируется от BG_LIGHTNESS_DARK_FLOOR (для L=0 в обложке)
+// к bgLightness (для L=1). При bgLightness=1 фон совпадает с доминантой; при
+// bgLightness=0.9 — почти совпадает; floor не даёт провалиться в чёрный для
+// очень тёмных обложек.
+function dominantBgFromPalette(palette: string[], bgLightness: number): string {
+    const dominant = palette.length > 0 ? palette[0] : FALLBACK_PALETTE[0]
+    const { h, s, l } = hexToHsl(dominant)
+    const l2 = BG_LIGHTNESS_DARK_FLOOR + (bgLightness - BG_LIGHTNESS_DARK_FLOOR) * l
+    const { r, g, b } = hslToRgb(h, s, clamp01(l2))
+    return rgbToHex(r, g, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -758,6 +853,12 @@ class CanvasBackground {
     private rafId = 0
     private resizeObserver: ResizeObserver | null = null
     private coverObserver: MutationObserver | null = null
+    // Последние физические (device-pixel) размеры канваса и последняя строка
+    // CSS-фильтра — чтобы resize() не переустанавливал canvas.width/height и
+    // filter, когда они на самом деле не изменились (см. resize()).
+    private lastPhysWidth = -1
+    private lastPhysHeight = -1
+    private lastAppliedFilter: string | null = null
 
     private settings: AddonRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS }
     private basePalette: string[] = []
@@ -788,12 +889,17 @@ class CanvasBackground {
     private lastJsonTrackId: string | null = null
     private lastPaletteUpdateTime: number = 0
 
-    // Источник палитры: 'cover' (обложка) / 'derivedColors' (JSON 127.0.0.1:2007).
-    // Если usingJsonPalette=true — applyCover/loadCover игнорируются,
-    // поллер применяет палитру от derivedColors при смене track.id.
-    private usingJsonPalette = false
-    private jsonPoller: TrackJsonPoller | null = null
-    private lastJsonTrackId: string | null = null
+    // Источник, для которого сейчас реально запущены поллер/observer (см.
+    // applyPaletteFromSource). Нужен, чтобы отличить настоящую смену режима
+    // от повторного вызова requestPaletteRefresh() без смены источника —
+    // иначе каждый такой вызов сбрасывал бы lastJsonTrackId/lastAppliedTrackId
+    // и палитра переприменялась бы по несколько раз на одну смену трека.
+    private activePaletteSource: string | null = null
+
+    // Последний узел poster-content, на который навешан coverObserver.
+    // Позволяет делать observeCover() идемпотентным: повторный вызов с тем же
+    // узлом ничего не пересоздаёт.
+    private observedPosterRoot: Element | null = null
 
     constructor(container: HTMLElement, initialSettings?: Partial<AddonRuntimeSettings>) {
         this.container = container
@@ -859,7 +965,7 @@ class CanvasBackground {
             window.addEventListener('resize', this.onWindowResize)
         }
 
-        const initialDominant = this.dominantBgFromPalette(FALLBACK_PALETTE, this.settings.bgLightness)
+        const initialDominant = dominantBgFromPalette(FALLBACK_PALETTE, this.settings.bgLightness)
         this.applyPalette(FALLBACK_PALETTE, initialDominant)
 
         this.applyPaletteFromSource()
@@ -1022,7 +1128,31 @@ class CanvasBackground {
     //   - mixed:      запустить поллер + подгрузить обложку + observer (нужен для coverTopPalette).
     private applyPaletteFromSource(force: boolean = false): void {
         const source = String(this.settings.paletteSource)
-        log(`applyPaletteFromSource: текущий источник палитры = "${source}"`)
+        log(`applyPaletteFromSource: текущий источник палитры = "${source}" (force=${force})`)
+
+        // requestPaletteRefresh() вызывается на КАЖДОЕ релевантное изменение DOM
+        // (не только на смену трека — modal watcher реагирует на любые мутации
+        // модалки/обложки), и при смене трека таких вызовов обычно 2-3 подряд.
+        // Если источник палитры не менялся и это не принудительный пересчёт
+        // (смена настройки paletteSource) — поллер и dedupe-состояние уже
+        // корректны, полный сброс не нужен. Раньше он выполнялся безусловно,
+        // из-за чего lastJsonTrackId/lastAppliedTrackId сбрасывались на каждый
+        // такой вызов, и один и тот же трек применялся заново несколько раз —
+        // отсюда резкий «скачок» цвета вместо одного плавного перехода.
+        if (!force && this.activePaletteSource === source) {
+            log(`applyPaletteFromSource: источник "${source}" не менялся — пропускаем сброс поллера/observer'а`)
+            if (source === PALETTE_SOURCE_COVER || source === PALETTE_SOURCE_MIXED) {
+                // Обложка привязана к конкретному DOM-узлу poster-content, который
+                // мог быть пересоздан (например, модалка переоткрылась) — на этот
+                // случай освежаем привязку. observeCover() идемпотентен: если узел
+                // не менялся, он не пересоздаёт MutationObserver.
+                const current = this.findCover()
+                if (current) this.applyCover(current, false)
+                this.observeCover()
+            }
+            return
+        }
+        this.activePaletteSource = source
 
         // По умолчанию отключаем поллер — он будет включён только для не-cover режимов.
         this.jsonPoller?.stop()
@@ -1035,6 +1165,7 @@ class CanvasBackground {
         // результат не перезаписал палитру нового режима после переключения.
         this.coverObserver?.disconnect()
         this.coverObserver = null
+        this.observedPosterRoot = null
         if (this.coverDebounceTimer !== null) {
             window.clearTimeout(this.coverDebounceTimer)
             this.coverDebounceTimer = null
@@ -1099,7 +1230,7 @@ class CanvasBackground {
         log(`applyTrackUpdate: новый track.id="${update.id}", применяем палитру (source=${source})`)
         const palette =
             source === PALETTE_SOURCE_MIXED ? mixDerivedWithCover(update.colors, this.coverTopPalette) : expandDerivedPalette(update.colors)
-        const dominant = this.dominantBgFromPalette(palette, this.settings.bgLightness)
+        const dominant = dominantBgFromPalette(palette, this.settings.bgLightness)
         this.basePalette = palette
         this.applyPalette(palette, dominant, update.id)
     }
@@ -1122,21 +1253,40 @@ class CanvasBackground {
         const physW = Math.round(width * dpr)
         const physH = Math.round(height * dpr)
 
-        this.canvas.width = physW
-        this.canvas.height = physH
+        // CSS-размеры (style.width/height) дешёвые и не влияют на WebGL-буфер —
+        // обновляем их всегда, безусловно.
         this.canvas.style.width = width + 'px'
         this.canvas.style.height = height + 'px'
-
-        // bgDiv всегда зеркалит размеры canvas
         this.bgDiv.style.width = width + 'px'
         this.bgDiv.style.height = height + 'px'
 
-        // Viewport WebGL в физических пикселях; шейдер оперирует CSS-пикселями
-        // (u_resolution задаётся в CSS-пикселях), так что DPR прозрачен для логики блобов.
-        gl.viewport(0, 0, physW, physH)
+        // А вот canvas.width/height — дорогая операция: ЛЮБОЕ присвоение (даже
+        // того же самого значения) немедленно очищает буфер отрисовки WebGL в
+        // прозрачный. ResizeObserver во время перетаскивания угла окна может
+        // сработать десятки раз с физически одинаковым (округлённым) размером —
+        // раньше мы всё равно каждый раз чистили canvas и ждали следующего кадра
+        // rAF, а браузер иногда успевал отрисовать этот пустой кадр — отсюда
+        // мерцание. Теперь реально трогаем буфер только при настоящем изменении.
+        if (physW !== this.lastPhysWidth || physH !== this.lastPhysHeight) {
+            this.canvas.width = physW
+            this.canvas.height = physH
+            this.lastPhysWidth = physW
+            this.lastPhysHeight = physH
 
-        // Обновляем CSS-фильтр, потому что радиус blur'а блобов разный
-        // для мобильного и десктопного viewport'а.
+            // Viewport WebGL в физических пикселях; шейдер оперирует CSS-пикселями
+            // (u_resolution задаётся в CSS-пикселях), так что DPR прозрачен для логики блобов.
+            gl.viewport(0, 0, physW, physH)
+
+            // Сразу перерисовываем кадр синхронно, не дожидаясь следующего тика
+            // requestAnimationFrame — иначе между очисткой буфера выше и следующим
+            // draw() браузер может отрисовать полностью прозрачный канвас, что и
+            // выглядит как мерцание при resize.
+            if (!this.disabled) {
+                this.draw(this.lastTime || performance.now())
+            }
+        }
+
+        // Обновляем CSS-фильтр только если он реально изменился (см. applyCanvasFilter).
         this.applyCanvasFilter(this.settings.filter)
     }
 
@@ -1249,8 +1399,8 @@ class CanvasBackground {
         // Подбираем для каждого блоба ближайший новый цвет по евклидову расстоянию в RGB
         // (тот же алгоритм, что в исходной 2D-версии).
         const initialTargets = this.blobs.map((_, i) => colors[i % colors.length])
-        const initialRgb = initialTargets.map(hex => this.hexToRgb(hex))
-        const newRgb = colors.map(hex => this.hexToRgb(hex))
+        const initialRgb = initialTargets.map(hex => hexToRgb(hex))
+        const newRgb = colors.map(hex => hexToRgb(hex))
         const used = new Array<boolean>(newRgb.length).fill(false)
 
         this.blobs.forEach((blob, i) => {
@@ -1310,120 +1460,10 @@ class CanvasBackground {
     // Цветовая математика (без изменений относительно 2D-версии)
     // -------------------------------------------------------------------------
 
-    private lerp(a: number, b: number, t: number): number {
-        return a + (b - a) * t
-    }
-
-    private hexToRgb(hex: string): { r: number; g: number; b: number } {
-        return {
-            r: parseInt(hex.slice(1, 3), 16),
-            g: parseInt(hex.slice(3, 5), 16),
-            b: parseInt(hex.slice(5, 7), 16),
-        }
-    }
-
-    // Нормализует hex-цвет к тройке float [0, 1] для WebGL-юниформов.
-    private hexToRgbFloat(hex: string): [number, number, number] {
-        const { r, g, b } = this.hexToRgb(hex)
-        return [r / 255, g / 255, b / 255]
-    }
-
-    private blendHex(a: string, b: string, t: number): string {
-        const ca = this.hexToRgb(a)
-        const cb = this.hexToRgb(b)
-        return (
-            '#' +
-            [Math.round(this.lerp(ca.r, cb.r, t)), Math.round(this.lerp(ca.g, cb.g, t)), Math.round(this.lerp(ca.b, cb.b, t))]
-                .map(v => v.toString(16).padStart(2, '0'))
-                .join('')
-        )
-    }
-
     private get effectiveFadeMs(): number {
         const fade = this.settings.paletteFadeMs
         if (fade <= 0) return 0.001
         return fade / Math.max(0.01, this.settings.paletteBlendSpeed)
-    }
-
-    private rgbToHex(r: number, g: number, b: number): string {
-        return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')
-    }
-
-    private rgbToHsl(hex: string): { h: number; s: number; l: number } {
-        const { r, g, b } = this.hexToRgb(hex)
-        const rn = r / 255
-        const gn = g / 255
-        const bn = b / 255
-        const max = Math.max(rn, gn, bn)
-        const min = Math.min(rn, gn, bn)
-        const l = (max + min) / 2
-        let h = 0
-        let s = 0
-        if (max !== min) {
-            const d = max - min
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
-            switch (max) {
-                case rn:
-                    h = (gn - bn) / d + (gn < bn ? 6 : 0)
-                    break
-                case gn:
-                    h = (bn - rn) / d + 2
-                    break
-                default:
-                    h = (rn - gn) / d + 4
-            }
-            h *= 60
-        }
-        return { h, s, l }
-    }
-
-    // HSL → (r, g, b) в [0, 255]. h в градусах [0, 360), s/l в [0, 1].
-    private hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
-        const c = (1 - Math.abs(2 * l - 1)) * s
-        const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
-        const m = l - c / 2
-        let r1 = 0
-        let g1 = 0
-        let b1 = 0
-        if (h < 60) {
-            r1 = c
-            g1 = x
-            b1 = 0
-        } else if (h < 120) {
-            r1 = x
-            g1 = c
-            b1 = 0
-        } else if (h < 180) {
-            r1 = 0
-            g1 = c
-            b1 = x
-        } else if (h < 240) {
-            r1 = 0
-            g1 = x
-            b1 = c
-        } else if (h < 300) {
-            r1 = x
-            g1 = 0
-            b1 = c
-        } else {
-            r1 = c
-            g1 = 0
-            b1 = x
-        }
-        return {
-            r: Math.round((r1 + m) * 255),
-            g: Math.round((g1 + m) * 255),
-            b: Math.round((b1 + m) * 255),
-        }
-    }
-
-    // Умножает L на factor, сохраняя H и S. Результат L ограничен [0, 1].
-    // Используется для приглушения bgDiv от доминирующего цвета обложки.
-    private scaleLightness(hex: string, factor: number): string {
-        const { h, s, l } = this.rgbToHsl(hex)
-        const l2 = Math.max(0, Math.min(1, l * factor))
-        const { r, g, b } = this.hslToRgb(h, s, l2)
-        return this.rgbToHex(r, g, b)
     }
 
     private shuffle<T>(arr: T[]): void {
@@ -1433,19 +1473,6 @@ class CanvasBackground {
             arr[i] = arr[j]
             arr[j] = tmp
         }
-    }
-
-    // Вычисляет цвет bgDiv по топовому кластеру палитры обложки:
-    // сохраняет H и S, а L линейно интерполируется от BG_LIGHTNESS_DARK_FLOOR
-    // (для L=0 в обложке) к bgLightness (для L=1). При bgLightness=1 фон
-    // совпадает с доминантой; при bgLightness=0.9 — почти совпадает;
-    // floor не даёт провалиться в чёрный для очень тёмных обложек.
-    private dominantBgFromPalette(palette: string[], bgLightness: number): string {
-        const dominant = palette.length > 0 ? palette[0] : FALLBACK_PALETTE[0]
-        const { h, s, l } = this.rgbToHsl(dominant)
-        const l2 = BG_LIGHTNESS_DARK_FLOOR + (bgLightness - BG_LIGHTNESS_DARK_FLOOR) * l
-        const { r, g, b } = this.hslToRgb(h, s, Math.max(0, Math.min(1, l2)))
-        return this.rgbToHex(r, g, b)
     }
 
     // -------------------------------------------------------------------------
@@ -1512,7 +1539,7 @@ class CanvasBackground {
 
             clusters.sort((a, b) => b.weight - a.weight)
 
-            const colors = clusters.slice(0, EXTRACTED_PALETTE_SIZE).map(cl => this.rgbToHex(Math.round(cl.r), Math.round(cl.g), Math.round(cl.b)))
+            const colors = clusters.slice(0, EXTRACTED_PALETTE_SIZE).map(cl => rgbToHex(Math.round(cl.r), Math.round(cl.g), Math.round(cl.b)))
             log('extracted colors from cover', colors)
             return colors
         } catch (err) {
@@ -1558,7 +1585,6 @@ class CanvasBackground {
                 log('applyCover: источник палитры = "derivedColors", изменение обложки игнорируется')
                 return
             }
-            const src = this.pickCoverUrl(img)
             if (!src) {
                 log('applyCover: cover image has no src, skipping')
                 return
@@ -1601,7 +1627,7 @@ class CanvasBackground {
             const base = this.extractColors(corsImage)
             this.basePalette = base
             this.coverTopPalette = base.slice(0, 2)
-            const dominant = this.dominantBgFromPalette(base, this.settings.bgLightness)
+            const dominant = dominantBgFromPalette(base, this.settings.bgLightness)
             this.applyPalette(base, dominant)
             this.lastAppliedSrc = src
         }
@@ -1613,7 +1639,7 @@ class CanvasBackground {
             log(`applyCover: CORS load failed for ${src}, using fallback palette`)
             this.basePalette = [...FALLBACK_PALETTE]
             this.coverTopPalette = FALLBACK_PALETTE.slice(0, 2)
-            const dominant = this.dominantBgFromPalette(FALLBACK_PALETTE, this.settings.bgLightness)
+            const dominant = dominantBgFromPalette(FALLBACK_PALETTE, this.settings.bgLightness)
             this.applyPalette(FALLBACK_PALETTE, dominant)
             this.lastAppliedSrc = src
         }
@@ -1720,7 +1746,7 @@ class CanvasBackground {
             // только интенсивность приглушения, оттенок должен сохраниться.
             const currentHex = this.targetBackgroundColor
             const currentPalette = this.basePalette
-            const recomputed = this.dominantBgFromPalette(currentPalette, next.bgLightness)
+            const recomputed = dominantBgFromPalette(currentPalette, next.bgLightness)
             this.backgroundColor = currentHex
             this.targetBackgroundColor = recomputed
             this.backgroundMix = 0
@@ -1780,6 +1806,10 @@ class CanvasBackground {
     //   - CSS-blur на canvas визуально смягчает только пиксели блобов.
     private applyCanvasFilter(userFilter: string): void {
         const userPart = userFilter && userFilter !== 'none' ? ` ${userFilter}` : ''
+        if (this.lastAppliedFilter === userPart) {
+            return
+        }
+        this.lastAppliedFilter = userPart
         this.canvas.style.setProperty('filter', userPart, 'important')
         this.canvas.style.setProperty('opacity', '1', 'important')
         log(`applyCanvasFilter: итоговый CSS-фильтр канваса = "${this.canvas.style.filter || '(пусто)'}"`)
@@ -1834,7 +1864,7 @@ class CanvasBackground {
         if (this.backgroundColor !== this.targetBackgroundColor) {
             this.backgroundMix = Math.min(1, this.backgroundMix + this.lastDt / this.effectiveFadeMs)
             const rawT = this.backgroundMix * this.backgroundMix * (3 - 2 * this.backgroundMix) // smoothstep
-            this.backgroundColor = this.blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
+            this.backgroundColor = blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
             if (this.backgroundMix >= 1) this.backgroundColor = this.targetBackgroundColor
         }
         this.bgDiv.style.backgroundColor = this.backgroundColor
@@ -1887,8 +1917,8 @@ class CanvasBackground {
                 blendT = 1.0
             }
 
-            const [pr, pg, pb] = this.hexToRgbFloat(blob.color)
-            const [cr, cg, cb] = this.hexToRgbFloat(blob.targetColor)
+            const [pr, pg, pb] = hexToRgbFloat(blob.color)
+            const [cr, cg, cb] = hexToRgbFloat(blob.targetColor)
             gl.uniform3f(this.uPrevColor, pr, pg, pb)
             gl.uniform3f(this.uColor, cr, cg, cb)
             gl.uniform1f(this.uBlendT, blendT)
@@ -1914,7 +1944,10 @@ class CanvasBackground {
                 const root = modal.querySelector(POSTER_CONTENT_SELECTOR)
                 if (!root) {
                     log('observeCover: poster content not found in modal, skipping observer')
+                } else if (root === this.observedPosterRoot && this.coverObserver) {
+                    log('observeCover: poster-content узел не изменился, observer уже активен — пропуск')
                 } else {
+                    this.coverObserver?.disconnect()
                     this.coverObserver = new MutationObserver(records => {
                         log(`coverObserver: получено ${records.length} записей мутаций`)
                         for (const record of records) {
@@ -1932,6 +1965,7 @@ class CanvasBackground {
                         attributeFilter: ['src', 'srcset'],
                         childList: true,
                     })
+                    this.observedPosterRoot = root
                     log('cover observer started')
                 }
             }
@@ -1975,13 +2009,7 @@ function ensureBackground(): void {
     }
     try {
         const runtime = readRuntimeSettings()
-        log(
-            `ensureBackground: initial settings enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
-                `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
-                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
-                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}, ` +
-                `paletteSource=${runtime.paletteSource}`,
-        )
+        log(`ensureBackground: initial settings ${describeRuntimeSettings(runtime)}`)
         backgroundInstance = new CanvasBackground(container, runtime)
         clearRetry()
         retriesLeft = MAX_RETRIES
@@ -2022,29 +2050,8 @@ function anyAddedNodeMatches(nodes: NodeList, selector: string): boolean {
 function watchModal(): void {
     const settingsStore = getAddonSettings(addonConfig.name)
     settingsStore.onChange(nextSettings => {
-        const runtime = {
-            enabled: readBooleanSetting(nextSettings, SETTING_KEY_ENABLED, DEFAULT_RUNTIME_SETTINGS.enabled),
-            showFps: readBooleanSetting(nextSettings, SETTING_KEY_SHOW_FPS, DEFAULT_RUNTIME_SETTINGS.showFps),
-            filter: readStringSetting(nextSettings, SETTING_KEY_FILTER, DEFAULT_RUNTIME_SETTINGS.filter),
-            paletteFadeMs: readNumberSetting(nextSettings, SETTING_KEY_PALETTE_FADE_MS, DEFAULT_RUNTIME_SETTINGS.paletteFadeMs),
-            paletteBlendSpeed: readNumberSetting(nextSettings, SETTING_KEY_PALETTE_BLEND_SPEED, DEFAULT_RUNTIME_SETTINGS.paletteBlendSpeed),
-            blobCountMin: readNumberSetting(nextSettings, SETTING_KEY_BLOB_COUNT_MIN, DEFAULT_RUNTIME_SETTINGS.blobCountMin),
-            blobSpeed: readNumberSetting(nextSettings, SETTING_KEY_BLOB_SPEED, DEFAULT_RUNTIME_SETTINGS.blobSpeed),
-            bgLightness: readNumberSetting(nextSettings, SETTING_KEY_BG_LIGHTNESS, DEFAULT_RUNTIME_SETTINGS.bgLightness),
-            warp: readNumberSetting(nextSettings, SETTING_KEY_WARP, DEFAULT_RUNTIME_SETTINGS.warp),
-            flow: readNumberSetting(nextSettings, SETTING_KEY_FLOW, DEFAULT_RUNTIME_SETTINGS.flow),
-            saturation: readNumberSetting(nextSettings, SETTING_KEY_SATURATION, DEFAULT_RUNTIME_SETTINGS.saturation),
-            highlight: readNumberSetting(nextSettings, SETTING_KEY_HIGHLIGHT, DEFAULT_RUNTIME_SETTINGS.highlight),
-            paletteSource: readSelectSetting(nextSettings, SETTING_KEY_PALETTE_SOURCE, DEFAULT_RUNTIME_SETTINGS.paletteSource, PALETTE_SOURCE_VALUES),
-        }
-        log(
-            `settings changed: enabled=${runtime.enabled}, showFps=${runtime.showFps}, ` +
-                `filter=${runtime.filter}, ` +
-                `paletteFadeMs=${runtime.paletteFadeMs}, paletteBlendSpeed=${runtime.paletteBlendSpeed}, ` +
-                `blobCountMin=${runtime.blobCountMin}, blobSpeed=${runtime.blobSpeed}, bgLightness=${runtime.bgLightness}, ` +
-                `warp=${runtime.warp}, flow=${runtime.flow}, saturation=${runtime.saturation}, highlight=${runtime.highlight}, ` +
-                `paletteSource=${runtime.paletteSource}`,
-        )
+        const runtime = buildRuntimeSettingsFromStore(nextSettings)
+        log(`settings changed: ${describeRuntimeSettings(runtime)}`)
         backgroundInstance?.applySettings(runtime)
     })
 
