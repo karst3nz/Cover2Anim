@@ -17,9 +17,41 @@ div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode::after {
     z-index: 1 !important;
 }
 
-div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode > *:not(.c2a-canvas-bg):not(.c2a-fps) {
+div[data-test-id='FULLSCREEN_PLAYER_MODAL'].canvas-mode > :not(.c2a-canvas-bg):not(.c2a-bg-div):not(.c2a-fps) {
     position: relative;
-    z-index: 2;
+    z-index: 3;
+}
+
+.ps-apple-cover-host.canvas-mode > .c2a-canvas-bg {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    z-index: 2 !important;
+    pointer-events: none !important;
+    display: block !important;
+}
+
+.ps-apple-cover-host.canvas-mode > .c2a-bg-div {
+    position: absolute !important;
+    inset: 0 !important;
+    z-index: 1 !important;
+    pointer-events: none !important;
+}
+
+.ps-apple-cover-host.canvas-mode > :not(.c2a-canvas-bg):not(.c2a-bg-div):not(.c2a-fps) {
+    position: relative;
+    z-index: 3 !important;
+}
+
+.ps-apple-cover-host.canvas-mode > .c2a-fps {
+    position: absolute !important;
+    z-index: 10 !important;
+}
+
+.ps-apple-cover-host > :not(.ps-apple-cover-bg):not(.c2a-canvas-bg):not(.c2a-bg-div):not(.c2a-fps) {
+    z-index: 1;
+    position: relative;
 }
 
 .c2a-fps {
