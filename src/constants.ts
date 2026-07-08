@@ -11,10 +11,10 @@ const POSTER_CONTENT_SELECTOR = '[data-test-id="FULLSCREEN_PLAYER_POSTER_CONTENT
 const COVER_SELECTOR = 'img[data-test-id="ENTITY_COVER_IMAGE"]'
 
 // --- Палитра по умолчанию (применяется до загрузки обложки через CORS). ---
-const FALLBACK_PALETTE = ['#ff3366', '#ff8800', '#ffcc00', '#00ccff', '#4466ff', '#aa00ff']
+const FALLBACK_PALETTE = ['#000000', '#000000', '#000000', '#000000', '#000000', '#000000']
 
 // Цвет фона до первого applyPalette и для случаев, когда CORS-загрузка обложки упала.
-const INITIAL_BACKGROUND_COLOR = '#050505'
+const INITIAL_BACKGROUND_COLOR = '#000000'
 
 // --- Тайминги ---
 // Время (мс) полного бленда палитры blob'ов и фона при смене обложки.
