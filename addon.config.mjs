@@ -9,7 +9,7 @@ const addonConfig = {
     image: 'logo.png',
     banner: 'banner.png',
     libraryLogo: '',
-    tags: ['template'],
+    tags: ['UI'],
     conflictsWith: ['8c4b0e14-e365-4160-ab4c-8c26cf3fa84e'],
     dependencies: [],
     allowedUrls: ['https://avatars.yandex.net', 'http://127.0.0.1:2007'],
