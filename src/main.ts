@@ -69,6 +69,7 @@ import {
     POSTER_CONTENT_SELECTOR,
     RETRY_DELAY_MS,
 } from './constants'
+import { AddonSettings } from '@pulsesync/yamusic-types'
 
 // ---------------------------------------------------------------------------
 // Шейдеры WebGL2
@@ -404,7 +405,7 @@ function sanitizeSettings(raw: Partial<AddonRuntimeSettings>): AddonRuntimeSetti
 // AddonRuntimeSettings. Единая точка чтения — используется и при первом
 // старте (readRuntimeSettings), и при live-обновлении настроек (watchModal),
 // чтобы порядок полей и дефолты не могли разъехаться между двумя местами.
-function buildRuntimeSettingsFromStore(settings: unknown): AddonRuntimeSettings {
+function buildRuntimeSettingsFromStore(settings: AddonSettings): AddonRuntimeSettings {
     return {
         enabled: readBooleanSetting(settings, SETTING_KEYS.enabled, DEFAULT_RUNTIME_SETTINGS.enabled),
         showFps: readBooleanSetting(settings, SETTING_KEYS.showFps, DEFAULT_RUNTIME_SETTINGS.showFps),
@@ -852,6 +853,12 @@ class CanvasBackground {
     private rafId = 0
     private resizeObserver: ResizeObserver | null = null
     private coverObserver: MutationObserver | null = null
+    // Последние физические (device-pixel) размеры канваса и последняя строка
+    // CSS-фильтра — чтобы resize() не переустанавливал canvas.width/height и
+    // filter, когда они на самом деле не изменились (см. resize()).
+    private lastPhysWidth = -1
+    private lastPhysHeight = -1
+    private lastAppliedFilter: string | null = null
 
     private settings: AddonRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS }
     private basePalette: string[] = []
@@ -1246,21 +1253,40 @@ class CanvasBackground {
         const physW = Math.round(width * dpr)
         const physH = Math.round(height * dpr)
 
-        this.canvas.width = physW
-        this.canvas.height = physH
+        // CSS-размеры (style.width/height) дешёвые и не влияют на WebGL-буфер —
+        // обновляем их всегда, безусловно.
         this.canvas.style.width = width + 'px'
         this.canvas.style.height = height + 'px'
-
-        // bgDiv всегда зеркалит размеры canvas
         this.bgDiv.style.width = width + 'px'
         this.bgDiv.style.height = height + 'px'
 
-        // Viewport WebGL в физических пикселях; шейдер оперирует CSS-пикселями
-        // (u_resolution задаётся в CSS-пикселях), так что DPR прозрачен для логики блобов.
-        gl.viewport(0, 0, physW, physH)
+        // А вот canvas.width/height — дорогая операция: ЛЮБОЕ присвоение (даже
+        // того же самого значения) немедленно очищает буфер отрисовки WebGL в
+        // прозрачный. ResizeObserver во время перетаскивания угла окна может
+        // сработать десятки раз с физически одинаковым (округлённым) размером —
+        // раньше мы всё равно каждый раз чистили canvas и ждали следующего кадра
+        // rAF, а браузер иногда успевал отрисовать этот пустой кадр — отсюда
+        // мерцание. Теперь реально трогаем буфер только при настоящем изменении.
+        if (physW !== this.lastPhysWidth || physH !== this.lastPhysHeight) {
+            this.canvas.width = physW
+            this.canvas.height = physH
+            this.lastPhysWidth = physW
+            this.lastPhysHeight = physH
 
-        // Обновляем CSS-фильтр, потому что радиус blur'а блобов разный
-        // для мобильного и десктопного viewport'а.
+            // Viewport WebGL в физических пикселях; шейдер оперирует CSS-пикселями
+            // (u_resolution задаётся в CSS-пикселях), так что DPR прозрачен для логики блобов.
+            gl.viewport(0, 0, physW, physH)
+
+            // Сразу перерисовываем кадр синхронно, не дожидаясь следующего тика
+            // requestAnimationFrame — иначе между очисткой буфера выше и следующим
+            // draw() браузер может отрисовать полностью прозрачный канвас, что и
+            // выглядит как мерцание при resize.
+            if (!this.disabled) {
+                this.draw(this.lastTime || performance.now())
+            }
+        }
+
+        // Обновляем CSS-фильтр только если он реально изменился (см. applyCanvasFilter).
         this.applyCanvasFilter(this.settings.filter)
     }
 
@@ -1780,6 +1806,10 @@ class CanvasBackground {
     //   - CSS-blur на canvas визуально смягчает только пиксели блобов.
     private applyCanvasFilter(userFilter: string): void {
         const userPart = userFilter && userFilter !== 'none' ? ` ${userFilter}` : ''
+        if (this.lastAppliedFilter === userPart) {
+            return
+        }
+        this.lastAppliedFilter = userPart
         this.canvas.style.setProperty('filter', userPart, 'important')
         this.canvas.style.setProperty('opacity', '1', 'important')
         log(`applyCanvasFilter: итоговый CSS-фильтр канваса = "${this.canvas.style.filter || '(пусто)'}"`)
