@@ -96,6 +96,9 @@ const BLOB_SPEED_DRIFT_MAX = 0.00025
 const BLOB_SPEED_PULSE_MIN = 0.0002
 const BLOB_SPEED_PULSE_MAX = 0.00045
 
+// Скорость блобов при паузе в плеере
+const BLOB_PAUSE_SPEED = 0.25
+
 // --- Blob'ы: шейдерные эффекты ---
 // Сила domain warping в фрагментном шейдере: 0 = почти статичные кляксы,
 // 1 = ярко выраженные «облака» с текучей формой. UI-слайдер PulseSync.
@@ -251,4 +254,5 @@ export {
     PALETTE_SOURCE_DERIVED,
     PALETTE_SOURCE_MIXED,
     PALETTE_SOURCE_VALUES,
+    BLOB_PAUSE_SPEED,
 }

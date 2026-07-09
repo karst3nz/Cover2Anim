@@ -68,8 +68,10 @@ import {
     PALETTE_WAVE_SPREAD,
     POSTER_CONTENT_SELECTOR,
     RETRY_DELAY_MS,
+    BLOB_PAUSE_SPEED,
 } from './constants'
 import { AddonSettings } from '@pulsesync/yamusic-types'
+import { Addon } from '@pulsesync/yamusic-types'
 
 // ---------------------------------------------------------------------------
 // Шейдеры WebGL2
@@ -183,8 +185,10 @@ void main() {
     //    на ~40% пикселей всех блобов.
     if (dist > 0.65) discard;
 
-    // 3. Базовая мягкая круглая маска: 1 в центре → 0 на радиусе 1.0.
-    float radial = 1.0 - smoothstep(0.45, 1.0, dist);
+    // 3. Дыхание блоба: медленная пульсация радиуса маски, ±3%.
+    //    Даёт органическое ощущение "живого" пятна без доп. текстур.
+    float breathe = 0.03 * sin(u_time * 0.6 + dist * 4.0);
+    float radial = 1.0 - smoothstep(0.45 + breathe, 1.0, dist);
 
     // 4. Один проход domain warping. q.x и q.y считаются ОДНИМ fbm3
     //    с большим смещением между осями (3.7 vs 11.2) — это даёт
@@ -212,18 +216,28 @@ void main() {
     float bT = u_blendT * u_blendT * (3.0 - 2.0 * u_blendT);
     vec3 baseColor = mix(u_prevColor, u_color, bT);
 
-    // 8. Подсветка центра.
-    float hl = u_highlight * (1.0 - dist);
-    vec3 finalColor = mix(baseColor, min(baseColor + vec3(0.22), vec3(1.0)), hl);
+    // 8. Псевдо-Френель: истончение цвета к краю имитирует подповерхностное
+    //    рассеяние света внутри "стеклянного" блоба. Дёшево — одна pow().
+    float fresnel = pow(clamp(dist / 0.65, 0.0, 1.0), 2.5);
+    vec3 edgeTint = mix(baseColor, vec3(1.0), 0.15 * fresnel);
 
-    // 9. Saturation boost.
+    // 9. Лёгкий хроматический сдвиг на краю: R чуть смещён наружу,
+    //    B чуть внутрь — псевдо-дисперсия без доп. сэмплов текстуры,
+    //    использует уже посчитанный noiseMod как модулятор силы.
+    float chroma = fresnel * noiseMod * 0.06;
+    vec3 finalColor = edgeTint + vec3(chroma, 0.0, -chroma);
+
+    // 10. Подсветка центра.
+    float hl = u_highlight * (1.0 - dist);
+    finalColor = mix(finalColor, min(finalColor + vec3(0.22), vec3(1.0)), hl);
+
+    // 11. Saturation boost.
     float luma = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
     finalColor = mix(vec3(luma), finalColor, u_saturation);
 
-    outColor = vec4(finalColor, alpha);
+    outColor = vec4(clamp(finalColor, 0.0, 1.0), alpha);
 }
 `
-
 // ---------------------------------------------------------------------------
 // Логирование
 // ---------------------------------------------------------------------------
@@ -802,12 +816,43 @@ function hslToHex(h: number, s: number, l: number): string {
 // к bgLightness (для L=1). При bgLightness=1 фон совпадает с доминантой; при
 // bgLightness=0.9 — почти совпадает; floor не даёт провалиться в чёрный для
 // очень тёмных обложек.
+//
+// ВАЖНО: у HSL знаменатель формулы S — (max+min) при L≈0 и (2-max-min) при
+// L≈1 — стремится к нулю. Из-за этого для почти-чёрных или почти-белых
+// пикселей (типичный тёмный фон обложки + JPEG-шум в 2-3 значения на канал)
+// S и H вычисляются из чистого шума сжатия и могут давать S=15-20% и
+// произвольный H. Пока цвет тёмный, этот шум не виден. Но именно этот
+// почти-чёрный кластер чаще всего оказывается «доминирующим» (самый большой
+// по площади — фон обложки), и когда мы поднимаем его L до bgLightness
+// (~0.9), шумовой оттенок становится ярко видимым цветным кастом (часто
+// зеленоватым/оливковым) вместо нейтрального серого. saturationConfidence
+// гасит S тем сильнее, чем ближе L исходного цвета к 0 или к 1.
 function dominantBgFromPalette(palette: string[], bgLightness: number): string {
     const dominant = palette.length > 0 ? palette[0] : FALLBACK_PALETTE[0]
     const { h, s, l } = hexToHsl(dominant)
+
+    // На L=0 или L=1 доверия к S нет вовсе (0), к L=0.12/0.88 — доверие полное (1).
+    const NOISE_FLOOR_L = 0.12
+    const saturationConfidence = Math.min(clamp01(l / NOISE_FLOOR_L), clamp01((1 - l) / NOISE_FLOOR_L))
+    const reliableS = s * saturationConfidence
+
     const l2 = BG_LIGHTNESS_DARK_FLOOR + (bgLightness - BG_LIGHTNESS_DARK_FLOOR) * l
-    const { r, g, b } = hslToRgb(h, s, clamp01(l2))
+    const { r, g, b } = hslToRgb(h, reliableS, clamp01(l2))
     return rgbToHex(r, g, b)
+}
+
+// Возвращает сдвиг фазы бленда фона в координатах colorMix [0..1], чтобы
+// кривая фона совпадала с одной из кривых блобов. У блобов:
+//   colorOffset_i = (i / paletteLength) * PALETTE_WAVE_SPREAD,
+//   rawT_i = clamp(blob.colorMix - colorOffset_i).
+// Фон не имеет индекса i — берём медиану диапазона: (paletteLength-1)/(2*paletteLength) *
+// PALETTE_WAVE_SPREAD. Для нечётной длины палитры это ровно середина волны; для чётной —
+// смещён на половину шага к более «позднему» блобу. В обоих случаях фон стартует и
+// финиширует вместе со всеми блобами (colorMix=0..1 — общая шкала).
+function computeBgColorOffset(paletteLength: number): number {
+    if (paletteLength <= 0) return 0
+    const denom = 2 * paletteLength
+    return ((paletteLength - 1) / denom) * PALETTE_WAVE_SPREAD
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +892,8 @@ class CanvasBackground {
     private bgDiv: HTMLDivElement
 
     private blobs: Blob[] = []
+    private currentBlobSpeed = 0
+    private addon!: Addon
     private animationTime = 0
     private lastTime = 0
     private lastDt = INITIAL_FRAME_DELTA_MS
@@ -874,6 +921,11 @@ class CanvasBackground {
     private backgroundColor: string = INITIAL_BACKGROUND_COLOR
     private targetBackgroundColor: string = INITIAL_BACKGROUND_COLOR
     private backgroundMix: number = 1
+    // Сдвиг фазы для фона — повторяет формулу блобов (i / count) * PALETTE_WAVE_SPREAD.
+    // Фон не имеет индекса i, поэтому берём середину волны (медиану colorOffset блобов).
+    // Благодаря этому кривая бленда фона — одна из семейства кривых блобов:
+    // общий старт (colorMix=0), общий финиш (colorMix=1), одна и та же smoothstep-форма.
+    private backgroundColorOffset: number = 0
 
     private coverRequestId = 0
     private lastAppliedSrc: string | null = null
@@ -971,6 +1023,31 @@ class CanvasBackground {
         this.applyPaletteFromSource()
 
         log('background attached to', container)
+        this.currentBlobSpeed = this.settings.blobSpeed
+        this.addon = new window.Addon('Cover2Anim')
+
+        this.addon.player.on('play', () => {
+            this.rescaleBlobSpeed(this.currentBlobSpeed, this.settings.blobSpeed)
+        })
+
+        this.addon.player.on('pause', () => {
+            this.rescaleBlobSpeed(this.currentBlobSpeed, BLOB_PAUSE_SPEED)
+            // this.testRescale()
+        })
+    }
+
+    // Тестовая функция для проверки изменения скорости блобов в реальном времени
+    private async testRescale(): Promise<void> {
+        let oldSpeedScale = this.currentBlobSpeed
+
+        const arr = Array.from({ length: 10000 }, () => +(Math.random() * (4 - 0.25) + 0.25).toFixed(2))
+
+        for (const newSpeedScale of arr) {
+            this.rescaleBlobSpeed(oldSpeedScale, newSpeedScale)
+            oldSpeedScale = newSpeedScale
+
+            await new Promise(resolve => setTimeout(resolve, 100))
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1089,6 +1166,8 @@ class CanvasBackground {
         this.coverObserver?.disconnect()
         window.removeEventListener('resize', this.onWindowResize)
         this.container.classList.remove('canvas-mode')
+        this.addon.player.removeAllListeners('play')
+        this.addon.player.removeAllListeners('pause')
 
         // Освобождаем WebGL-ресурсы (одного удаления canvas недостаточно, чтобы освободить память GPU).
         if (!this.disabled) {
@@ -1385,6 +1464,37 @@ class CanvasBackground {
         log(`created ${this.blobs.length} blobs from palette (speedScale=${speedScale})`, colors)
     }
 
+    // Меняет скорость дрейфа/пульсации уже существующих блобов «на лету»,
+    // БЕЗ их пересоздания: позиции, цвета, фазы и радиусы остаются прежними,
+    // масштабируются только speedX/speedY/pulseSpeed — пропорционально
+    // отношению нового и старого значения blobSpeed.
+    private rescaleBlobSpeed(oldSpeedScale: number, newSpeedScale: number): void {
+        if (!Number.isFinite(newSpeedScale) || newSpeedScale <= 0) {
+            log(`rescaleBlobSpeed: некорректное значение newSpeedScale=${newSpeedScale}, отмена`)
+            return
+        }
+        if (!Number.isFinite(oldSpeedScale) || oldSpeedScale <= 0) {
+            log(`rescaleBlobSpeed: некорректное значение oldSpeedScale=${oldSpeedScale}, отмена`)
+            return
+        }
+        if (oldSpeedScale === newSpeedScale) {
+            return
+        }
+        if (this.blobs.length === 0) {
+            log('rescaleBlobSpeed: блобов ещё нет, менять нечего')
+            return
+        }
+
+        const ratio = newSpeedScale / oldSpeedScale
+        for (const blob of this.blobs) {
+            blob.speedX *= ratio
+            blob.speedY *= ratio
+            blob.pulseSpeed *= ratio
+        }
+        this.currentBlobSpeed = newSpeedScale
+        log(`rescaleBlobSpeed: (${oldSpeedScale} → ${newSpeedScale}, ratio=${ratio.toFixed(4)})`)
+    }
+
     private updatePalette(colors: string[], trackId?: string | null): void {
         if (trackId && trackId === this.lastAppliedTrackId) {
             log(`updatePalette: пропуск повторного вызова для trackId="${trackId}" (палитра уже применена)`)
@@ -1566,10 +1676,14 @@ class CanvasBackground {
                 this.backgroundColor = dominant
                 this.targetBackgroundColor = dominant
                 this.backgroundMix = 1
+                this.backgroundColorOffset = 0
             } else if (dominant !== this.targetBackgroundColor) {
                 this.backgroundColor = this.targetBackgroundColor
                 this.targetBackgroundColor = dominant
                 this.backgroundMix = 0
+                // Синхронизируем кривую фона с волной блобов: фон стартует
+                // и финиширует одновременно с ними, по той же smoothstep-форме.
+                this.backgroundColorOffset = computeBgColorOffset(colors.length)
             }
         }
     }
@@ -1750,6 +1864,8 @@ class CanvasBackground {
             this.backgroundColor = currentHex
             this.targetBackgroundColor = recomputed
             this.backgroundMix = 0
+            // Та же синхронизация с волной блобов, что и в applyPalette.
+            this.backgroundColorOffset = computeBgColorOffset(currentPalette.length)
             log(`applySettings: bgLightness changed → ${next.bgLightness} (new bg=${recomputed})`)
         }
 
@@ -1781,9 +1897,22 @@ class CanvasBackground {
             gl.useProgram(null)
         }
 
+        // blobSpeed меняем «на лету» через rescaleBlobSpeed — ДО перезаписи
+        // this.settings, т.к. методу нужны и старое, и новое значение.
+
+        if (
+            blobSpeedChanged &&
+            !blobCountChanged &&
+            this.blobs.length > 0 &&
+            window.pulsesyncApi?.getState()?.playerState?.status?.value !== 'paused'
+        ) {
+            this.currentBlobSpeed = next.blobSpeed
+            this.rescaleBlobSpeed(prev.blobSpeed, next.blobSpeed)
+        }
+
         this.settings = next
 
-        if ((blobCountChanged || blobSpeedChanged) && this.blobs.length > 0) {
+        if (blobCountChanged && this.blobs.length > 0) {
             this.recreateBlobs()
             log(`applySettings: blobs recreated (countMin=${next.blobCountMin}, speed=${next.blobSpeed})`)
         }
@@ -1840,7 +1969,17 @@ class CanvasBackground {
             blob.baseX = Math.min(Math.max(blob.baseX, 0), width)
             blob.baseY = Math.min(Math.max(blob.baseY, 0), height)
 
-            blob.currentRadius = blob.radius + Math.sin(this.animationTime * blob.pulseSpeed + blob.pulsePhase) * BLOB_PULSE_AMPLITUDE
+            // Фазы дрейфа/пульсации — накопительные (растут на dt*speed каждый кадр),
+            // а НЕ пересчитываются от абсолютного this.animationTime. Это критично
+            // для rescaleBlobSpeed(): при изменении speedX/speedY/pulseSpeed «на лету»
+            // накопленное значение фазы не трогается — меняется только скорость её
+            // дальнейшего роста, поэтому блоб плавно ускоряется/замедляется, а не
+            // «телепортируется» в другую точку орбиты.
+            blob.phaseX += dt * blob.speedX
+            blob.phaseY += dt * blob.speedY
+            blob.pulsePhase += dt * blob.pulseSpeed
+
+            blob.currentRadius = blob.radius + Math.sin(blob.pulsePhase) * BLOB_PULSE_AMPLITUDE
 
             if (blob.color !== blob.targetColor) {
                 blob.colorMix = Math.min(1, blob.colorMix + dt / fadeMs)
@@ -1861,10 +2000,19 @@ class CanvasBackground {
         const height = this.container.clientHeight || window.innerHeight
 
         // --- Цвет фона (рисуется на bgDiv, не на WebGL-канвасе) ---
+        // Кривая бленда фона — одна из семейства кривых блобов:
+        // rawT = clamp(backgroundMix - backgroundColorOffset), затем smoothstep.
+        // Пока backgroundMix < backgroundColorOffset, фон держит предыдущий цвет
+        // (rawT <= 0 → blendHex = a). Это и есть синхронизация с волной блобов:
+        // фон «просыпается» в середине волны и финиширует одновременно со всеми.
         if (this.backgroundColor !== this.targetBackgroundColor) {
             this.backgroundMix = Math.min(1, this.backgroundMix + this.lastDt / this.effectiveFadeMs)
-            const rawT = this.backgroundMix * this.backgroundMix * (3 - 2 * this.backgroundMix) // smoothstep
-            this.backgroundColor = blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
+            const shifted = this.backgroundMix - this.backgroundColorOffset
+            const clamped = shifted < 0 ? 0 : shifted > 1 ? 1 : shifted
+            const rawT = clamped * clamped * (3 - 2 * clamped) // smoothstep
+            if (clamped > 0) {
+                this.backgroundColor = blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
+            }
             if (this.backgroundMix >= 1) this.backgroundColor = this.targetBackgroundColor
         }
         this.bgDiv.style.backgroundColor = this.backgroundColor
@@ -1895,11 +2043,11 @@ class CanvasBackground {
         const sin = Math.sin(angle)
         gl.uniformMatrix2fv(this.uRotation, false, [cos, sin, -sin, cos])
 
-        const t = this.animationTime
-
         for (const blob of this.blobs) {
-            const x = blob.baseX + Math.sin(t * blob.speedX + blob.phaseX) * blob.orbitX
-            const y = blob.baseY + Math.cos(t * blob.speedY + blob.phaseY) * blob.orbitY
+            // blob.phaseX/blob.phaseY уже накоплены с учётом dt*speed в updateBlobs() —
+            // абсолютное время здесь больше не участвует (см. комментарий в updateBlobs).
+            const x = blob.baseX + Math.sin(blob.phaseX) * blob.orbitX
+            const y = blob.baseY + Math.cos(blob.phaseY) * blob.orbitY
             const r = blob.currentRadius
 
             gl.uniform2f(this.uBlobCenter, x, y)
@@ -2088,7 +2236,6 @@ function watchModal(): void {
         document.addEventListener('DOMContentLoaded', observeRoot, { once: true })
     }
 }
-
 log('addon loaded')
 
 if (document.readyState === 'loading') {
