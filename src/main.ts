@@ -841,6 +841,20 @@ function dominantBgFromPalette(palette: string[], bgLightness: number): string {
     return rgbToHex(r, g, b)
 }
 
+// Возвращает сдвиг фазы бленда фона в координатах colorMix [0..1], чтобы
+// кривая фона совпадала с одной из кривых блобов. У блобов:
+//   colorOffset_i = (i / paletteLength) * PALETTE_WAVE_SPREAD,
+//   rawT_i = clamp(blob.colorMix - colorOffset_i).
+// Фон не имеет индекса i — берём медиану диапазона: (paletteLength-1)/(2*paletteLength) *
+// PALETTE_WAVE_SPREAD. Для нечётной длины палитры это ровно середина волны; для чётной —
+// смещён на половину шага к более «позднему» блобу. В обоих случаях фон стартует и
+// финиширует вместе со всеми блобами (colorMix=0..1 — общая шкала).
+function computeBgColorOffset(paletteLength: number): number {
+    if (paletteLength <= 0) return 0
+    const denom = 2 * paletteLength
+    return ((paletteLength - 1) / denom) * PALETTE_WAVE_SPREAD
+}
+
 // ---------------------------------------------------------------------------
 // CanvasBackground
 // ---------------------------------------------------------------------------
@@ -907,6 +921,11 @@ class CanvasBackground {
     private backgroundColor: string = INITIAL_BACKGROUND_COLOR
     private targetBackgroundColor: string = INITIAL_BACKGROUND_COLOR
     private backgroundMix: number = 1
+    // Сдвиг фазы для фона — повторяет формулу блобов (i / count) * PALETTE_WAVE_SPREAD.
+    // Фон не имеет индекса i, поэтому берём середину волны (медиану colorOffset блобов).
+    // Благодаря этому кривая бленда фона — одна из семейства кривых блобов:
+    // общий старт (colorMix=0), общий финиш (colorMix=1), одна и та же smoothstep-форма.
+    private backgroundColorOffset: number = 0
 
     private coverRequestId = 0
     private lastAppliedSrc: string | null = null
@@ -1657,10 +1676,14 @@ class CanvasBackground {
                 this.backgroundColor = dominant
                 this.targetBackgroundColor = dominant
                 this.backgroundMix = 1
+                this.backgroundColorOffset = 0
             } else if (dominant !== this.targetBackgroundColor) {
                 this.backgroundColor = this.targetBackgroundColor
                 this.targetBackgroundColor = dominant
                 this.backgroundMix = 0
+                // Синхронизируем кривую фона с волной блобов: фон стартует
+                // и финиширует одновременно с ними, по той же smoothstep-форме.
+                this.backgroundColorOffset = computeBgColorOffset(colors.length)
             }
         }
     }
@@ -1841,6 +1864,8 @@ class CanvasBackground {
             this.backgroundColor = currentHex
             this.targetBackgroundColor = recomputed
             this.backgroundMix = 0
+            // Та же синхронизация с волной блобов, что и в applyPalette.
+            this.backgroundColorOffset = computeBgColorOffset(currentPalette.length)
             log(`applySettings: bgLightness changed → ${next.bgLightness} (new bg=${recomputed})`)
         }
 
@@ -1975,10 +2000,19 @@ class CanvasBackground {
         const height = this.container.clientHeight || window.innerHeight
 
         // --- Цвет фона (рисуется на bgDiv, не на WebGL-канвасе) ---
+        // Кривая бленда фона — одна из семейства кривых блобов:
+        // rawT = clamp(backgroundMix - backgroundColorOffset), затем smoothstep.
+        // Пока backgroundMix < backgroundColorOffset, фон держит предыдущий цвет
+        // (rawT <= 0 → blendHex = a). Это и есть синхронизация с волной блобов:
+        // фон «просыпается» в середине волны и финиширует одновременно со всеми.
         if (this.backgroundColor !== this.targetBackgroundColor) {
             this.backgroundMix = Math.min(1, this.backgroundMix + this.lastDt / this.effectiveFadeMs)
-            const rawT = this.backgroundMix * this.backgroundMix * (3 - 2 * this.backgroundMix) // smoothstep
-            this.backgroundColor = blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
+            const shifted = this.backgroundMix - this.backgroundColorOffset
+            const clamped = shifted < 0 ? 0 : shifted > 1 ? 1 : shifted
+            const rawT = clamped * clamped * (3 - 2 * clamped) // smoothstep
+            if (clamped > 0) {
+                this.backgroundColor = blendHex(this.backgroundColor, this.targetBackgroundColor, rawT)
+            }
             if (this.backgroundMix >= 1) this.backgroundColor = this.targetBackgroundColor
         }
         this.bgDiv.style.backgroundColor = this.backgroundColor
