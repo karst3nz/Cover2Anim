@@ -816,11 +816,28 @@ function hslToHex(h: number, s: number, l: number): string {
 // к bgLightness (для L=1). При bgLightness=1 фон совпадает с доминантой; при
 // bgLightness=0.9 — почти совпадает; floor не даёт провалиться в чёрный для
 // очень тёмных обложек.
+//
+// ВАЖНО: у HSL знаменатель формулы S — (max+min) при L≈0 и (2-max-min) при
+// L≈1 — стремится к нулю. Из-за этого для почти-чёрных или почти-белых
+// пикселей (типичный тёмный фон обложки + JPEG-шум в 2-3 значения на канал)
+// S и H вычисляются из чистого шума сжатия и могут давать S=15-20% и
+// произвольный H. Пока цвет тёмный, этот шум не виден. Но именно этот
+// почти-чёрный кластер чаще всего оказывается «доминирующим» (самый большой
+// по площади — фон обложки), и когда мы поднимаем его L до bgLightness
+// (~0.9), шумовой оттенок становится ярко видимым цветным кастом (часто
+// зеленоватым/оливковым) вместо нейтрального серого. saturationConfidence
+// гасит S тем сильнее, чем ближе L исходного цвета к 0 или к 1.
 function dominantBgFromPalette(palette: string[], bgLightness: number): string {
     const dominant = palette.length > 0 ? palette[0] : FALLBACK_PALETTE[0]
     const { h, s, l } = hexToHsl(dominant)
+
+    // На L=0 или L=1 доверия к S нет вовсе (0), к L=0.12/0.88 — доверие полное (1).
+    const NOISE_FLOOR_L = 0.12
+    const saturationConfidence = Math.min(clamp01(l / NOISE_FLOOR_L), clamp01((1 - l) / NOISE_FLOOR_L))
+    const reliableS = s * saturationConfidence
+
     const l2 = BG_LIGHTNESS_DARK_FLOOR + (bgLightness - BG_LIGHTNESS_DARK_FLOOR) * l
-    const { r, g, b } = hslToRgb(h, s, clamp01(l2))
+    const { r, g, b } = hslToRgb(h, reliableS, clamp01(l2))
     return rgbToHex(r, g, b)
 }
 
