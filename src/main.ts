@@ -74,6 +74,14 @@ import { AddonSettings } from '@pulsesync/yamusic-types'
 import { Addon } from '@pulsesync/yamusic-types'
 
 // ---------------------------------------------------------------------------
+// Публичный API rescaleBlobSpeed()
+// ---------------------------------------------------------------------------
+
+// Длительность плавного перехода скорости блобов «по умолчанию», если вызывающий
+// код (в т.ч. window.rescaleBlobSpeed()) не указал свою durationMs.
+const DEFAULT_BLOB_SPEED_TRANSITION_MS = 1000
+
+// ---------------------------------------------------------------------------
 // Шейдеры WebGL2
 // ---------------------------------------------------------------------------
 
@@ -860,7 +868,7 @@ function computeBgColorOffset(paletteLength: number): number {
 // ---------------------------------------------------------------------------
 
 class CanvasBackground {
-    private readonly container: HTMLElement
+    private container: HTMLElement
     private readonly canvas: HTMLCanvasElement
     private readonly gl: WebGL2RenderingContext
 
@@ -893,6 +901,15 @@ class CanvasBackground {
 
     private blobs: Blob[] = []
     private currentBlobSpeed = 0
+
+    // Состояние плавного перехода currentBlobSpeed → speedTransitionTo, запущенного
+    // публичным rescaleBlobSpeed(). Прогрессируется каждый кадр в updateBlobs().
+    private speedTransitionActive = false
+    private speedTransitionFrom = 0
+    private speedTransitionTo = 0
+    private speedTransitionElapsedMs = 0
+    private speedTransitionDurationMs = 0
+
     private addon!: Addon
     private animationTime = 0
     private lastTime = 0
@@ -913,6 +930,10 @@ class CanvasBackground {
     // где 4 derived-цвета HSL-блендятся с 2 топовыми цветами обложки.
     private coverTopPalette: string[] = []
     private disabled = false
+    // Живёт ли сейчас canvas/bgDiv в DOM полноэкранного плеера и крутится ли rAF-цикл.
+    // false — фон открепллён (плеер свёрнут из fullscreen), но экземпляр, WebGL-контекст,
+    // шейдеры и блобы НЕ уничтожены — см. detach()/attach().
+    private isAttached = false
 
     private fpsElement: HTMLDivElement | null = null
     private fpsFrames = 0
@@ -1027,25 +1048,23 @@ class CanvasBackground {
         this.addon = new window.Addon('Cover2Anim')
 
         this.addon.player.on('play', () => {
-            this.rescaleBlobSpeed(this.currentBlobSpeed, this.settings.blobSpeed)
+            this.rescaleBlobSpeed(this.settings.blobSpeed)
         })
 
         this.addon.player.on('pause', () => {
-            this.rescaleBlobSpeed(this.currentBlobSpeed, BLOB_PAUSE_SPEED)
+            this.rescaleBlobSpeed(BLOB_PAUSE_SPEED)
             // this.testRescale()
         })
+
+        this.isAttached = true
     }
 
     // Тестовая функция для проверки изменения скорости блобов в реальном времени
     private async testRescale(): Promise<void> {
-        let oldSpeedScale = this.currentBlobSpeed
-
         const arr = Array.from({ length: 10000 }, () => +(Math.random() * (4 - 0.25) + 0.25).toFixed(2))
 
         for (const newSpeedScale of arr) {
-            this.rescaleBlobSpeed(oldSpeedScale, newSpeedScale)
-            oldSpeedScale = newSpeedScale
-
+            this.rescaleBlobSpeed(newSpeedScale)
             await new Promise(resolve => setTimeout(resolve, 100))
         }
     }
@@ -1154,7 +1173,7 @@ class CanvasBackground {
     // -------------------------------------------------------------------------
 
     destroy(): void {
-        cancelAnimationFrame(this.rafId)
+        this.stopAnimation()
 
         if (this.coverDebounceTimer !== null) {
             window.clearTimeout(this.coverDebounceTimer)
@@ -1190,10 +1209,104 @@ class CanvasBackground {
 
         this.fpsFrames = 0
         this.fpsLastSampleTime = 0
+        this.isAttached = false
     }
 
-    isContainerAlive(): boolean {
-        return this.container.isConnected && document.contains(this.canvas)
+    // Прикреплён ли сейчас фон к живой модалке fullscreen-плеера (canvas в DOM,
+    // rAF-цикл активен). Используется bootstrap'ом (ensureBackground/reconcileBackground),
+    // чтобы решить: создавать ли новый экземпляр, переприкрепить существующий (attach())
+    // или открепить его (detach()) — вместо разрушения/пересоздания WebGL-контекста
+    // на каждое открытие/закрытие плеера.
+    isCurrentlyAttached(): boolean {
+        return this.isAttached
+    }
+
+    // Текущий DOM-узел модалки, к которому прикреплён фон (актуален только пока
+    // isCurrentlyAttached() === true). Нужен bootstrap'у, чтобы отличить «модалка та
+    // же самая» от «модалка пересоздана под тем же селектором» (тогда нужен reattach).
+    currentContainer(): HTMLElement | null {
+        return this.isAttached ? this.container : null
+    }
+
+    // Открепляет фон от DOM полноэкранного плеера БЕЗ уничтожения WebGL-контекста,
+    // шейдеров, блобов и палитры. Останавливает rAF-цикл (главная экономия ресурсов —
+    // без него не тратится время ни на updateBlobs(), ни на draw()), останавливает
+    // JSON-поллер и cover-observer (не нужны, пока фон не виден), но оставляет
+    // canvas/bgDiv/fpsElement в памяти (просто вынутыми из DOM), чтобы attach()
+    // мог мгновенно вернуть их обратно без повторной инициализации WebGL2.
+    detach(): void {
+        if (this.disabled) return
+        if (!this.isAttached) return
+
+        this.stopAnimation()
+
+        this.jsonPoller?.stop()
+        this.coverObserver?.disconnect()
+        this.coverObserver = null
+        this.observedPosterRoot = null
+        if (this.coverDebounceTimer !== null) {
+            window.clearTimeout(this.coverDebounceTimer)
+            this.coverDebounceTimer = null
+        }
+
+        this.resizeObserver?.disconnect()
+        this.resizeObserver = null
+        window.removeEventListener('resize', this.onWindowResize)
+
+        this.container.classList.remove('canvas-mode')
+        this.bgDiv.remove()
+        this.canvas.remove()
+        this.fpsElement?.remove()
+
+        // Форсируем реальный resize() при следующем attach() — физический размер
+        // нового контейнера модалки может отличаться от прежнего.
+        this.lastPhysWidth = -1
+        this.lastPhysHeight = -1
+
+        this.isAttached = false
+        log('background detached (canvas kept in memory, animation paused)')
+    }
+
+    // Возвращает ранее откреплённый фон в DOM новой модалки fullscreen-плеера,
+    // переиспользуя уже созданные canvas/WebGL-контекст/шейдеры/блобы — без единого
+    // gl.createProgram()/gl.createBuffer() и без recreateBlobs(). Возобновляет rAF-цикл
+    // и перепривязывает поллер/observer палитры к новому DOM (старый poster-content
+    // узел уничтожен вместе со старой модалкой).
+    attach(container: HTMLElement): void {
+        if (this.disabled) {
+            this.container = container
+            return
+        }
+        if (this.isAttached && this.container === container) return
+
+        this.container = container
+
+        this.container.insertBefore(this.canvas, this.container.firstChild)
+        this.container.insertBefore(this.bgDiv, this.canvas.nextSibling)
+        this.container.classList.add('canvas-mode')
+
+        if (this.fpsElement) {
+            this.container.appendChild(this.fpsElement)
+            this.fpsFrames = 0
+            this.fpsLastSampleTime = 0
+        }
+
+        if (typeof ResizeObserver !== 'undefined') {
+            this.resizeObserver = new ResizeObserver(() => this.resize())
+            this.resizeObserver.observe(this.container)
+        } else {
+            window.addEventListener('resize', this.onWindowResize)
+        }
+
+        this.resize()
+        this.startAnimation()
+
+        // force=true: старый observedPosterRoot/поллер были привязаны к DOM прежней
+        // модалки, который уже уничтожен — нужен полный, а не «ленивый», ресинк.
+        this.applyPaletteFromSource(true)
+
+        this.isAttached = true
+        log('background reattached to', container)
     }
 
     requestPaletteRefresh(): void {
@@ -1374,6 +1487,10 @@ class CanvasBackground {
     // -------------------------------------------------------------------------
 
     private startAnimation(): void {
+        if (this.rafId !== 0) return // цикл уже крутится — не плодим второй rAF-loop
+        // lastTime обнуляем, чтобы первый dt после (пере)запуска не оказался огромным
+        // (время, прошедшее, пока фон был откреплён/на паузе, не должно «прыгнуть» в анимацию).
+        this.lastTime = 0
         const loop = (time: number): void => {
             const dt = this.lastTime === 0 ? 16 : time - this.lastTime
             this.lastTime = time
@@ -1384,6 +1501,16 @@ class CanvasBackground {
             this.rafId = requestAnimationFrame(loop)
         }
         this.rafId = requestAnimationFrame(loop)
+    }
+
+    // Останавливает rAF-цикл, не трогая WebGL-ресурсы/блобы/палитру — используется
+    // при detach(), чтобы не тратить CPU/GPU на рендер блобов, пока полноэкранный
+    // плеер закрыт. startAnimation() позже продолжит с того же состояния.
+    private stopAnimation(): void {
+        if (this.rafId !== 0) {
+            cancelAnimationFrame(this.rafId)
+            this.rafId = 0
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1464,26 +1591,76 @@ class CanvasBackground {
         log(`created ${this.blobs.length} blobs from palette (speedScale=${speedScale})`, colors)
     }
 
-    // Меняет скорость дрейфа/пульсации уже существующих блобов «на лету»,
-    // БЕЗ их пересоздания: позиции, цвета, фазы и радиусы остаются прежними,
-    // масштабируются только speedX/speedY/pulseSpeed — пропорционально
-    // отношению нового и старого значения blobSpeed.
-    private rescaleBlobSpeed(oldSpeedScale: number, newSpeedScale: number): void {
+    // Публичный API (вынесен также в window.rescaleBlobSpeed(), см. bootstrap внизу
+    // файла). Плавно переводит скорость дрейфа/пульсации уже существующих блобов
+    // от текущего эффективного значения к newSpeedScale за durationMs миллисекунд,
+    // БЕЗ пересоздания блобов: позиции, цвета, фазы и радиусы остаются прежними,
+    // масштабируются только speedX/speedY/pulseSpeed.
+    //
+    // durationMs необязателен — по умолчанию DEFAULT_BLOB_SPEED_TRANSITION_MS.
+    // durationMs=0 (или отрицательное) применяет новую скорость мгновенно, как
+    // раньше делала эта функция.
+    public rescaleBlobSpeed(newSpeedScale: number, durationMs: number = DEFAULT_BLOB_SPEED_TRANSITION_MS): void {
         if (!Number.isFinite(newSpeedScale) || newSpeedScale <= 0) {
             log(`rescaleBlobSpeed: некорректное значение newSpeedScale=${newSpeedScale}, отмена`)
-            return
-        }
-        if (!Number.isFinite(oldSpeedScale) || oldSpeedScale <= 0) {
-            log(`rescaleBlobSpeed: некорректное значение oldSpeedScale=${oldSpeedScale}, отмена`)
-            return
-        }
-        if (oldSpeedScale === newSpeedScale) {
             return
         }
         if (this.blobs.length === 0) {
             log('rescaleBlobSpeed: блобов ещё нет, менять нечего')
             return
         }
+
+        const safeDuration = Number.isFinite(durationMs) ? Math.max(0, durationMs) : DEFAULT_BLOB_SPEED_TRANSITION_MS
+        const fromSpeed = this.currentBlobSpeed > 0 ? this.currentBlobSpeed : newSpeedScale
+
+        if (fromSpeed === newSpeedScale) {
+            this.speedTransitionActive = false
+            return
+        }
+
+        if (safeDuration === 0) {
+            this.applyBlobSpeedScale(fromSpeed, newSpeedScale)
+            this.speedTransitionActive = false
+            log(`rescaleBlobSpeed: мгновенно (${fromSpeed} → ${newSpeedScale})`)
+            return
+        }
+
+        // Стартуем переход от реального текущего значения — если предыдущий переход
+        // ещё не завершился, продолжаем плавно из его промежуточной точки, без скачка.
+        this.speedTransitionActive = true
+        this.speedTransitionFrom = fromSpeed
+        this.speedTransitionTo = newSpeedScale
+        this.speedTransitionElapsedMs = 0
+        this.speedTransitionDurationMs = safeDuration
+        log(`rescaleBlobSpeed: плавный переход (${fromSpeed} → ${newSpeedScale}, duration=${safeDuration}мс)`)
+    }
+
+    // Прогрессирует активный плавный переход скорости на dt миллисекунд. Вызывается
+    // из updateBlobs() каждый кадр. На каждом шаге вычисляет промежуточную целевую
+    // скорость по smoothstep-кривой и применяет её через applyBlobSpeedScale() —
+    // это даёт плавное ускорение/замедление без скачков между кадрами.
+    private advanceSpeedTransition(dt: number): void {
+        if (!this.speedTransitionActive) return
+
+        this.speedTransitionElapsedMs += dt
+        const t = clampNumber(this.speedTransitionElapsedMs / this.speedTransitionDurationMs, 0, 1)
+        const eased = t * t * (3 - 2 * t) // smoothstep
+        const frameTargetSpeed = lerp(this.speedTransitionFrom, this.speedTransitionTo, eased)
+
+        this.applyBlobSpeedScale(this.currentBlobSpeed, frameTargetSpeed)
+
+        if (t >= 1) {
+            this.speedTransitionActive = false
+        }
+    }
+
+    // Собственно масштабирование speedX/speedY/pulseSpeed существующих блобов —
+    // пропорционально отношению нового и старого значения speedScale. Не трогает
+    // накопленные фазы, позиции, цвета и радиусы блобов.
+    private applyBlobSpeedScale(oldSpeedScale: number, newSpeedScale: number): void {
+        if (!Number.isFinite(newSpeedScale) || newSpeedScale <= 0) return
+        if (!Number.isFinite(oldSpeedScale) || oldSpeedScale <= 0) return
+        if (oldSpeedScale === newSpeedScale) return
 
         const ratio = newSpeedScale / oldSpeedScale
         for (const blob of this.blobs) {
@@ -1492,7 +1669,6 @@ class CanvasBackground {
             blob.pulseSpeed *= ratio
         }
         this.currentBlobSpeed = newSpeedScale
-        log(`rescaleBlobSpeed: (${oldSpeedScale} → ${newSpeedScale}, ratio=${ratio.toFixed(4)})`)
     }
 
     private updatePalette(colors: string[], trackId?: string | null): void {
@@ -1906,8 +2082,7 @@ class CanvasBackground {
             this.blobs.length > 0 &&
             window.pulsesyncApi?.getState()?.playerState?.status?.value !== 'paused'
         ) {
-            this.currentBlobSpeed = next.blobSpeed
-            this.rescaleBlobSpeed(prev.blobSpeed, next.blobSpeed)
+            this.rescaleBlobSpeed(next.blobSpeed)
         }
 
         this.settings = next
@@ -1961,6 +2136,7 @@ class CanvasBackground {
     // -------------------------------------------------------------------------
     private updateBlobs(dt: number): void {
         this.animationTime += dt
+        this.advanceSpeedTransition(dt)
         const width = this.container.clientWidth || window.innerWidth
         const height = this.container.clientHeight || window.innerHeight
         const fadeMs = this.effectiveFadeMs
@@ -2126,9 +2302,29 @@ class CanvasBackground {
 // Bootstrap (точка входа)
 // ---------------------------------------------------------------------------
 
+declare global {
+    interface Window {
+        // Публичный API: плавно меняет скорость дрейфа/пульсации блобов текущего
+        // фона. durationMs необязателен (по умолчанию DEFAULT_BLOB_SPEED_TRANSITION_MS,
+        // 0 — мгновенное применение без перехода).
+        rescaleBlobSpeed?: (newSpeedScale: number, durationMs?: number) => void
+    }
+}
+
 let backgroundInstance: CanvasBackground | null = null
 let retryTimer: number | null = null
 let retriesLeft = MAX_RETRIES
+
+// Экспонируем rescaleBlobSpeed() наружу как window.rescaleBlobSpeed(), чтобы им
+// можно было пользоваться извне аддона (консоль, другие скрипты и т.д.).
+// Делегирует текущему живому экземпляру фона, если он есть.
+window.rescaleBlobSpeed = (newSpeedScale: number, durationMs?: number): void => {
+    if (!backgroundInstance) {
+        log('window.rescaleBlobSpeed: экземпляр фона ещё не создан, вызов проигнорирован')
+        return
+    }
+    backgroundInstance.rescaleBlobSpeed(newSpeedScale, durationMs)
+}
 
 function clearRetry(): void {
     if (retryTimer !== null) {
@@ -2138,8 +2334,10 @@ function clearRetry(): void {
     }
 }
 
+// Инициализирует фон ОДИН раз за сессию (первый WebGL2-контекст, шейдеры, блобы).
+// При повторных вызовах, если экземпляр уже существует, а модалка найдена —
+// просто переприкрепляет уже готовый canvas (attach()), не трогая WebGL-ресурсы.
 function ensureBackground(): void {
-    if (backgroundInstance) return
     const container = document.querySelector(MODAL_SELECTOR) as HTMLElement | null
     if (!container) {
         if (retriesLeft <= 0) {
@@ -2156,9 +2354,14 @@ function ensureBackground(): void {
         return
     }
     try {
-        const runtime = readRuntimeSettings()
-        log(`ensureBackground: initial settings ${describeRuntimeSettings(runtime)}`)
-        backgroundInstance = new CanvasBackground(container, runtime)
+        if (!backgroundInstance) {
+            const runtime = readRuntimeSettings()
+            log(`ensureBackground: первичная инициализация фона за сессию (${describeRuntimeSettings(runtime)})`)
+            backgroundInstance = new CanvasBackground(container, runtime)
+        } else if (backgroundInstance.currentContainer() !== container) {
+            log('ensureBackground: canvas уже существует — переиспользуем его через attach()')
+            backgroundInstance.attach(container)
+        }
         clearRetry()
         retriesLeft = MAX_RETRIES
     } catch (err) {
@@ -2168,17 +2371,26 @@ function ensureBackground(): void {
 
 function reconcileBackground(): void {
     log('reconcileBackground: проверка состояния текущего фона')
-    if (backgroundInstance && !backgroundInstance.isContainerAlive()) {
-        log('reconcileBackground: container detached, recreating')
-        backgroundInstance.destroy()
-        backgroundInstance = null
+    const container = document.querySelector(MODAL_SELECTOR) as HTMLElement | null
+
+    if (!container) {
+        // Модалка полноэкранного плеера закрыта. Не уничтожаем фон — открепляем
+        // его (canvas/WebGL-контекст/блобы остаются в памяти, rAF-цикл встаёт на
+        // паузу), чтобы вернуть его мгновенно при следующем открытии.
+        if (backgroundInstance?.isCurrentlyAttached()) {
+            log('reconcileBackground: модалка закрыта — detach() (ресурсы фона сохранены)')
+            backgroundInstance.detach()
+        }
+        return
     }
-    if (!backgroundInstance) {
-        log('reconcileBackground: экземпляр фона отсутствует, вызываем ensureBackground()')
+
+    if (!backgroundInstance || !backgroundInstance.isCurrentlyAttached() || backgroundInstance.currentContainer() !== container) {
+        log('reconcileBackground: модалка открыта — ensureBackground()/attach() к ней')
         ensureBackground()
         return
     }
-    log('reconcileBackground: экземпляр фона жив, запрашиваем обновление палитры')
+
+    log('reconcileBackground: фон уже прикреплён к текущей модалке, запрашиваем обновление палитры')
     backgroundInstance.requestPaletteRefresh()
 }
 
